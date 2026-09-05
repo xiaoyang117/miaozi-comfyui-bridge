@@ -1044,8 +1044,10 @@ except Exception as e:
 
 if __name__ == "__main__":
     import os as _os
-    import waitress
-    from waitress.server import create_server
+    import threading as _th
+    # 使用 werkzeug 服务器：waitress 对 SSE 长响应整体缓冲（进度事件无法
+    # 实时到达，表现为"中间内容消失"），werkzeug 逐块实时推送。
+    from werkzeug.serving import make_server
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     host = _os.getenv("HOST", "0.0.0.0")
     port = int(_os.getenv("PORT", "5000"))
@@ -1069,11 +1071,10 @@ if __name__ == "__main__":
           f"http://127.0.0.1:{port}/v1)")
     print("=" * 46)
 
-    # 多端口：waitress 每个端口一个 serve 线程
-    servers = [create_server(app, host=host, port=port, threads=8)]
+    # 多端口：每个端口一个 make_server 线程（threaded=True 并发处理请求）
+    servers = [make_server(host, port, app, threaded=True)]
     for ep in extra_ports:
-        servers.append(create_server(app, host=host, port=ep, threads=8))
-    import threading as _th
+        servers.append(make_server(host, ep, app, threaded=True))
     for srv in servers[1:]:
-        _th.Thread(target=srv.run, daemon=True).start()
-    servers[0].run()
+        _th.Thread(target=srv.serve_forever, daemon=True).start()
+    servers[0].serve_forever()
