@@ -39,6 +39,7 @@
       <div class="toolbar-sep"></div>
       <div class="toolbar-group chat-resolution">
         <select id="chat_resolution" title="选择输出分辨率"></select>
+        <button class="btn-secondary btn-res-manage" onclick="openResManager()" title="管理可用尺寸">⚙ 尺寸</button>
       </div>
       <div class="toolbar-sep"></div>
       <div class="toolbar-group" style="margin-left:auto">
@@ -224,6 +225,25 @@
   </div>
 </div>
 
+<!-- ================= 尺寸管理弹窗 ================= -->
+<div id="resManager" class="modal-overlay hidden" onclick="closeResManager()">
+  <div class="modal-box" style="max-width:520px" onclick="event.stopPropagation()">
+    <div class="modal-header modal-success" style="justify-content:space-between">
+      <span>⚙ 管理可用尺寸</span>
+      <button class="modal-close-btn" style="position:static;color:inherit" onclick="closeResManager()">✕</button>
+    </div>
+    <div class="modal-body" style="padding:12px 18px">
+      <div class="field-hint" style="margin-bottom:8px">在这里维护对话栏下拉里可选的尺寸，宽高需为 64 的倍数（如 896×1152）。</div>
+      <div id="resManagerList" class="source-list"></div>
+      <button class="btn-add-source" onclick="resManagerAdd()">+ 添加尺寸</button>
+      <div class="btn-inline-row" style="margin-top:10px">
+        <button class="btn-secondary" onclick="resManagerDefaults()">恢复默认</button>
+        <button onclick="resManagerSave()">保存并应用</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 // ================= 标签页 =================
 function switchTab(name) {
@@ -307,6 +327,12 @@ function reloadResPresets() {
 function populateResDropdown() {
   const sel = document.getElementById('chat_resolution');
   sel.innerHTML = '';
+  // 首项：自动（AI 决定）
+  const autoOpt = document.createElement('option');
+  autoOpt.value = 'auto';
+  autoOpt.textContent = '✨ 自动（AI 决定）';
+  autoOpt.dataset.auto = '1';
+  sel.appendChild(autoOpt);
   if (!resPresets.length) {
     const opt = document.createElement('option'); opt.value=''; opt.textContent='自定义'; sel.appendChild(opt);
     return;
@@ -322,11 +348,75 @@ function populateResDropdown() {
 function currentResolution() {
   const sel = document.getElementById('chat_resolution');
   const opt = sel.selectedOptions[0];
-  if (opt && opt.dataset && opt.dataset.w) {
-    return { width: parseInt(opt.dataset.w), height: parseInt(opt.dataset.h) };
+  if (opt && opt.dataset && opt.dataset.auto) {
+    return { auto: true, width: 0, height: 0 };
   }
-  return { width: parseInt(document.getElementById('s_gen_width').value)||0,
+  if (opt && opt.dataset && opt.dataset.w) {
+    return { auto: false, width: parseInt(opt.dataset.w), height: parseInt(opt.dataset.h) };
+  }
+  return { auto: false,
+           width: parseInt(document.getElementById('s_gen_width').value)||0,
            height: parseInt(document.getElementById('s_gen_height').value)||0 };
+}
+
+// ================= 尺寸管理弹窗 =================
+let resManagerDraft = [];
+function openResManager() {
+  resManagerDraft = JSON.parse(JSON.stringify(resPresets.length ? resPresets :
+    [{label:'896×1152',width:896,height:1152},{label:'1152×896',width:1152,height:896}]));
+  renderResManager();
+  document.getElementById('resManager').classList.remove('hidden');
+}
+function closeResManager() { document.getElementById('resManager').classList.add('hidden'); }
+function renderResManager() {
+  const box = document.getElementById('resManagerList');
+  box.innerHTML = '';
+  resManagerDraft.forEach((p, i) => {
+    const row = document.createElement('div');
+    row.className = 'source-row';
+    row.innerHTML = `
+      <input class="source-name" value="${escapeHtml(p.label||'')}" data-idx="${i}" placeholder="名称">
+      <input value="${p.width||''}" data-idx="${i}" data-k="w" placeholder="宽" style="max-width:80px">
+      <span style="color:var(--text-faint)">×</span>
+      <input value="${p.height||''}" data-idx="${i}" data-k="h" placeholder="高" style="max-width:80px">
+      <button class="btn-del-source" onclick="resManagerRemove(${i})">×</button>`;
+    box.appendChild(row);
+  });
+}
+function resManagerAdd() { resManagerDraft.push({label:'新尺寸', width:896, height:1152}); renderResManager(); }
+function resManagerRemove(i) { resManagerDraft.splice(i,1); renderResManager(); }
+function resManagerCollect() {
+  document.querySelectorAll('#resManagerList .source-row').forEach(row => {
+    const i = parseInt(row.querySelector('.source-name').dataset.idx);
+    const w = parseInt(row.querySelector('[data-k="w"]').value);
+    const h = parseInt(row.querySelector('[data-k="h"]').value);
+    if (!isNaN(w) && !isNaN(h) && w >= 64 && h >= 64) {
+      resManagerDraft[i] = { label: row.querySelector('.source-name').value.trim() || (w+'×'+h), width: w, height: h };
+    }
+  });
+  resManagerDraft = resManagerDraft.filter(p => p && p.width && p.height);
+}
+async function resManagerSave() {
+  resManagerCollect();
+  if (!resManagerDraft.length) { showModal('请至少保留一个有效尺寸', 'error'); return; }
+  resPresets = JSON.parse(JSON.stringify(resManagerDraft));
+  populateResDropdown();
+  // 同步到配置页的预设编辑区
+  renderResPresetEditor();
+  // 持久化到 settings.json
+  try {
+    const r = await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ resolution_presets: resPresets }) });
+    const d = await r.json();
+    if (d.success) { closeResManager(); showModal('尺寸列表已更新 ✅', 'success'); }
+    else showModal('保存失败: ' + (d.error||''), 'error');
+  } catch(e) { showModal('保存失败: ' + e.message, 'error'); }
+}
+function resManagerDefaults() {
+  resManagerDraft = [{label:'896×1152',width:896,height:1152},{label:'1152×896',width:1152,height:896},
+                     {label:'832×1216',width:832,height:1216},{label:'1216×832',width:1216,height:832},
+                     {label:'1024×1024',width:1024,height:1024}];
+  renderResManager();
 }
 
 // ================= 图片选择 =================
@@ -370,7 +460,7 @@ function removeImage() {
 // ================= 聊天记录持久化 =================
 function saveChatLog() { localStorage.setItem('chatLog', JSON.stringify(chatLog)); }
 function loadChatLog() { try { const r=localStorage.getItem('chatLog'); return r?JSON.parse(r):[]; } catch { return []; } }
-function restoreChatLog() { chatLog = loadChatLog(); chatLog.forEach((e,i)=>addChatBubble(e.role,e.text,e.imageUrl,e.search,i,e.vlm)); }
+function restoreChatLog() { chatLog = loadChatLog(); chatLog.forEach((e,i)=>addChatBubble(e.role,e.text,e.imageUrl,e.search,i,e.vlm,e.size)); }
 function clearChatLog() {
   if (!confirm('确定清空所有聊天记录？')) return;
   chatLog = []; chatHistory = []; userImageCache = {};
@@ -391,7 +481,7 @@ function setStep(step) {
 function hideStep() { document.getElementById('stepIndicator').classList.add('hidden'); }
 
 // ================= 气泡渲染 =================
-function addChatBubble(role, text, imageUrl, searchInfo, index, vlmText) {
+function addChatBubble(role, text, imageUrl, searchInfo, index, vlmText, sizeInfo) {
   const container = document.getElementById('chatMessages');
   const div = document.createElement('div');
   div.className = 'chat-bubble ' + (role === 'user' ? 'chat-user' : 'chat-assistant');
@@ -458,6 +548,21 @@ function addChatBubble(role, text, imageUrl, searchInfo, index, vlmText) {
         tip.textContent = '⚠️ 手动指定的角色标签未找到，请检查拼写（如 shiroko, blue_archive）';
         div.appendChild(tip);
       }
+    }
+    if (sizeInfo && sizeInfo.width && sizeInfo.height) {
+      const sz = document.createElement('div');
+      sz.className = 'chat-has-image';
+      const viaLabel = {
+        explicit: '用户指定',
+        manual: '手动',
+        fallback: '默认',
+      };
+      let viaText = viaLabel[sizeInfo.via] || '';
+      if ((sizeInfo.via||'').startsWith('rule:')) viaText = '规则:' + sizeInfo.via.slice(5);
+      if ((sizeInfo.via||'').startsWith('llm:')) viaText = 'AI判断:' + sizeInfo.via.slice(4);
+      sz.textContent = '📐 ' + sizeInfo.width + '×' + sizeInfo.height +
+                       (viaText ? ' · ' + viaText : '');
+      div.appendChild(sz);
     }
     if (text) {
       const p = document.createElement('pre'); p.className='chat-prompt'; p.textContent=text;
@@ -556,6 +661,7 @@ async function sendMessage() {
           role: roleTag,
           history: [], search_url_idx: parseInt(document.getElementById('searchUrlIdx').value)||0,
           workflow_path: wfPath,
+          auto_resolution: !!res.auto,
           width: res.width, height: res.height,
           image: hasImage ? imageData : [],
         })
@@ -602,10 +708,10 @@ async function sendMessage() {
     }
     if (result) {
       chatHistory.push({role:'assistant',content:result.prompt});
-      chatLog.push({role:'assistant',text:result.prompt,imageUrl:result.image,search:result.search,vlm:result.vlm});
+      chatLog.push({role:'assistant',text:result.prompt,imageUrl:result.image,search:result.search,vlm:result.vlm,size:result.size});
       saveChatLog();
       const cacheBust = result.image + '?cb=' + Date.now()+'_'+Math.random().toString(36).slice(2,6);
-      addChatBubble('assistant', result.prompt, cacheBust, result.search, chatLog.length-1, result.vlm);
+      addChatBubble('assistant', result.prompt, cacheBust, result.search, chatLog.length-1, result.vlm, result.size);
       const st = document.getElementById('stepIndicator');
       document.getElementById('stepText').textContent = '✅ 生成完成'; st.classList.add('step-done');
       setTimeout(hideStep, 1200);

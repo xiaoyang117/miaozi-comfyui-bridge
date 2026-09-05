@@ -47,6 +47,19 @@ EXTRACT_CN_SYSTEM = (
     "如果不知道是什么角色，输出：未知"
 )
 
+# 让 LLM 判断输出方向（横/竖/方），小模型友好：只输出一个词
+SIZE_DECIDE_SYSTEM = (
+    "你是图片方向判断器。根据用户的描述，判断最适合的输出方向。\n"
+    "只输出一个词，不要解释，不要多余字：\n"
+    "portrait  —— 竖图（头像、单人立绘、全身、手机壁纸）\n"
+    "landscape —— 横图（风景、多人场景、桌面壁纸、宽场景）\n"
+    "square    —— 方图（默认，无法判断时用这个）\n"
+    "例子：\n"
+    "输入：一个人的头像 -> portrait\n"
+    "输入：海边日落风景 -> landscape\n"
+    "输入：一只猫 -> square\n"
+)
+
 _IMG_REF = re.compile(
     r'(?:data:image/\w+;base64[^ ]*|https?://\S+\.(?:png|jpg|jpeg|gif|webp|bmp|svg)\b|\b\w+\.(?:png|jpg|jpeg|gif|webp|bmp|svg))\b',
     re.IGNORECASE)

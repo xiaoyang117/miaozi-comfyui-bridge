@@ -22,7 +22,8 @@ from character_lookup import resolver as char_resolver
 from comfyui.client import ComfyUIClient
 from llm.client import (LLMClient, PROMPT_SYSTEM_SPECIFIC,
                         PROMPT_WITH_CONTEXT_SPECIFIC,
-                        SEARCH_SYSTEM, SEARCH_SYSTEM_TINY, EXTRACT_CN_SYSTEM)
+                        SEARCH_SYSTEM, SEARCH_SYSTEM_TINY, EXTRACT_CN_SYSTEM,
+                        SIZE_DECIDE_SYSTEM)
 from settings import Settings
 
 BASE_DIR = Path(__file__).parent
@@ -175,6 +176,144 @@ def _translate_and_lookup(cn_name: str, llm: LLMClient,
     except Exception as e:
         print(f"[translate error] {e}")
         return []
+
+
+# ====================================================================== #
+# 分辨率自动决策（规则优先，LLM 兜底）
+# ====================================================================== #
+# 常见比例 -> 方向（用于从用户输入中提取）
+_RATIO_PATTERNS = [
+    # (正则, 方向)  方向: portrait / landscape / square
+    (r"\b(\d{1,2})\s*[:：]\s*(\d{1,2})\b", None),  # 动态判断比例
+    (r"\b(\d{2,4})\s*[x×*]\s*(\d{2,4})\b", None),  # 显式 1024x768
+]
+
+_DIRECTION_WORDS = {
+    "portrait": ["竖图", "竖版", "竖屏", "头像", "立绘", "全身", "半身",
+                 "portrait", "vertical", "mobile wallpaper", "手机壁纸",
+                 "single", "solo", "1girl", "1boy"],
+    "landscape": ["横图", "横版", "横屏", "桌面壁纸", "风景", "多人",
+                  "landscape", "horizontal", "desktop wallpaper", "wallpaper",
+                  "wide", "poster", "海报", "全景"],
+    "square": ["方图", "正方形", "方形", "square"],
+}
+
+# 方向 -> 默认候选尺寸（会被预设覆盖，此处是兜底）
+_FALLBACK_SIZES = {
+    "portrait": (832, 1216),
+    "landscape": (1216, 832),
+    "square": (1024, 1024),
+}
+
+
+def _extract_explicit_size(text: str):
+    """从用户输入中提取显式宽高或比例，返回 (w, h) 或 None。"""
+    import re as _re
+    # 显式 "1024x768" / "1024×768"（避免 \b 因中文是 \w 而失效）
+    m = _re.search(r"(?<!\d)(\d{2,4})\s*[x×*]\s*(\d{2,4})(?!\d)", text, _re.I)
+    if m:
+        w, h = int(m.group(1)), int(m.group(2))
+        return _sanitize_size(w, h)
+    # 比例 "16:9" / "3:4"
+    m = _re.search(r"(?<!\d)(\d{1,2})\s*[:：]\s*(\d{1,2})(?!\d)", text)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        if a and b:
+            # 依据比例推断方向，用 1024 基准
+            base = 1024
+            if a > b:
+                h = base
+                w = round(base * a / b / 64) * 64
+            elif b > a:
+                w = base
+                h = round(base * b / a / 64) * 64
+            else:
+                w = h = base
+            return _sanitize_size(w, h)
+    return None
+
+
+def _sanitize_size(w: int, h: int):
+    """把尺寸规整到 64 的倍数，限制在合理范围。"""
+    w = max(256, min(round(w / 64) * 64, 4096))
+    h = max(256, min(round(h / 64) * 64, 4096))
+    return w, h
+
+
+def _direction_from_text(text: str):
+    """规则层：从文本中判断方向，返回 portrait/landscape/square 或 None。"""
+    t = (text or "").lower()
+    for direction, words in _DIRECTION_WORDS.items():
+        for w in words:
+            if w.lower() in t:
+                return direction
+    return None
+
+
+def _pick_size_for_direction(direction: str):
+    """依据方向从预设里挑一个合适尺寸，否则用兜底。"""
+    presets = settings.resolution_presets
+    # 从预设里找最贴合方向的
+    for p in presets:
+        w, h = int(p.get("width", 0)), int(p.get("height", 0))
+        if not w or not h:
+            continue
+        if direction == "portrait" and h > w:
+            return w, h
+        if direction == "landscape" and w > h:
+            return w, h
+        if direction == "square" and w == h:
+            return w, h
+    # 预设里没有贴合方向 → 用默认 gen 尺寸
+    dw, dh = settings.gen_width, settings.gen_height
+    if direction == "portrait" and dw >= dh:
+        dw, dh = dh, dw
+    elif direction == "landscape" and dh >= dw:
+        dw, dh = dh, dw
+    elif direction == "square":
+        s = max(dw, dh)
+        dw = dh = s
+    return _sanitize_size(dw, dh)
+
+
+def decide_resolution(user_input: str, llm: LLMClient,
+                      history: list = None):
+    """决定输出分辨率，返回 (w, h, via)。规则优先，LLM 兜底。
+
+    via: explicit(用户显式写尺寸) / rule(规则词) / llm(LLM判断) / fallback
+    """
+    # 1) 显式尺寸/比例
+    explicit = _extract_explicit_size(user_input)
+    if explicit:
+        return explicit[0], explicit[1], "explicit"
+
+    # 2) 规则词（横/竖/方）
+    direction = _direction_from_text(user_input)
+    if direction:
+        w, h = _pick_size_for_direction(direction)
+        return w, h, f"rule:{direction}"
+
+    # 3) LLM 判断方向（兜底，只问一个词）
+    try:
+        ans = (llm._call(SIZE_DECIDE_SYSTEM, user_input, history) or "").lower()
+        if "portrait" in ans:
+            w, h = _pick_size_for_direction("portrait")
+            return w, h, "llm:portrait"
+        if "landscape" in ans:
+            w, h = _pick_size_for_direction("landscape")
+            return w, h, "llm:landscape"
+        if "square" in ans:
+            w, h = _pick_size_for_direction("square")
+            return w, h, "llm:square"
+    except Exception as e:
+        print(f"[size-decide error] {e}")
+
+    # 4) 全部失败 → 默认
+    w, h = settings.gen_width, settings.gen_height
+    w, h = _sanitize_size(w, h)
+    return w, h, "fallback"
+
+
 
 
 # ====================================================================== #
@@ -347,8 +486,10 @@ def generate():
             use_search = bool(data.get("use_search", True))
             history = data.get("history") or []
             search_url_idx = int(data.get("search_url_idx") or 0)
+            auto_resolution = bool(data.get("auto_resolution", False))
             width = data.get("width") or settings.gen_width
             height = data.get("height") or settings.gen_height
+            size_via = "manual"
 
             # ---------- 加载工作流 ----------
             try:
@@ -496,6 +637,12 @@ def generate():
                             "error": f"提示词生成失败: {e}"})
                 return
 
+            # ---------- Step 2.5: 分辨率自动决策 ----------
+            if auto_resolution:
+                width, height, size_via = decide_resolution(user_input, llm,
+                                                            history)
+                print(f"[size] auto -> {width}x{height} (via {size_via})")
+
             # ---------- Step 3: ComfyUI ----------
             yield _sse({"step": "comfyui"})
             try:
@@ -519,6 +666,9 @@ def generate():
                     "image": f"/outputs/{path.name}",
                     "prompt": prompt,
                     "search": search_info,
+                    "size": {"width": int(width) if width else None,
+                             "height": int(height) if height else None,
+                             "via": size_via},
                     "vlm": vlm_description,
                 })
             else:
