@@ -763,9 +763,10 @@ async function sendMessage() {
 
     let response;
     const roleTag = document.getElementById('chat_role').value.trim();
-    // fetch 建立超时：60s 连响应头都收不到（服务无响应/连接被占）则中止并报错
+    // 连接建立超时：仅当服务完全无响应（挂死）时才中止，不因生成慢/排队而误杀。
+    // 放宽到 10 分钟；一旦收到任何响应立即清除。
     const fetchCtrl = new AbortController();
-    const fetchTimer = setTimeout(() => fetchCtrl.abort(), 60000);
+    const fetchTimer = setTimeout(() => fetchCtrl.abort(), 600000);
     try {
     for (let attempt=1; attempt<=90; attempt++) {
       response = await fetch('/api/generate', {
@@ -781,8 +782,9 @@ async function sendMessage() {
         }),
         signal: fetchCtrl.signal,
       });
+      clearTimeout(fetchTimer);  // 已收到响应头，连接建立成功，取消超时
       const ct = response.headers.get('content-type')||'';
-      if (ct.includes('text/event-stream')) { clearTimeout(fetchTimer); hideStep(); break; }
+      if (ct.includes('text/event-stream')) { hideStep(); break; }
       const d = await response.json();
       if (d.queue) {
         showQueueState(attempt);
@@ -810,12 +812,11 @@ async function sendMessage() {
     document.getElementById('stepText').textContent = '🚀 已连接，开始执行…';
     const reader = response.body.getReader(); const decoder = new TextDecoder();
     let buffer='', result=null, failed=null;
-    // 流已建立后的整体看门狗：60s 无任何事件则视为异常（正常 LLM 会持续有秒数跳动）
-    const watchdog = setTimeout(() => { reader.cancel().catch(()=>{}); }, 60000);
-    try {
+    // 连接已建立后不再设超时：后端各阶段间隔本就很长（LLM 生成提示词 30~90s、
+    // 排队等待等），只要流不断、后端有 120s 超时与 error 事件兜底，前端只需被动
+    // 等待 done/error，绝不因"慢"而中断连接。
     while (true) {
       const {done,value} = await reader.read(); if (done) break;
-      clearTimeout(watchdog);
       buffer += decoder.decode(value,{stream:true});
       const lines = buffer.split('\n'); buffer = lines.pop()||'';
       for (const line of lines) {
@@ -828,10 +829,6 @@ async function sendMessage() {
         } else if (st==='done') { result = evt; finishSteps(true, '✅ 生成完成'); }
         else if (st==='error') { failed = evt; finishSteps(false, '❌ ' + (evt.error||'失败')); throw new Error(evt.error); }
       }
-      clearTimeout(watchdog);
-    }
-    } finally {
-      clearTimeout(watchdog);
     }
     if (result) {
       chatHistory.push({role:'assistant',content:result.prompt});
