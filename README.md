@@ -81,6 +81,26 @@ python app.py
 - 在对话栏 **"角色标签"** 框手动填 `shiroko, blue_archive` 绕过识别
 - 在 `character_lookup/aliases.json` 添加中文别名（一次添加，永久生效）
 
+### 📥 批量导入中文名（开源数据集，可选）
+
+内置导入器 `character_lookup/import_zh_names.py`，可把现成的
+「Danbooru 标签 → 中文名」对照表一键并入本地查询（**不依赖 LLM 翻译**）：
+
+```bash
+python character_lookup/import_zh_names.py <数据集文件或目录>
+# <文件> 支持 .sqlite/.db/.csv；给目录则自动遍历其中全部数据文件
+```
+
+- 现成数据集：HuggingFace `Aligadai/danbooru-10w-zh_cn`
+  （https://huggingface.co/datasets/Aligadai/danbooru-10w-zh_cn，两列 CSV）；
+  或任何含 `category` 列（4=角色/3=作品）的翻译表（如已下线的
+  ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table 结构）
+- **质量三重保险**：只保留本库真实存在的角色（与 characters.db join）、
+  丢弃通用标签/画师类目、清洗解释性后缀 —— 机翻/垃圾条目进不来
+- 产出 `character_lookup/zh_names.json`（中文名→角色）与 `zh_works.json`（作品名），
+  不覆盖手工 `aliases.json`；运行时自动命中，重启即生效
+- 角色库重建：`python character_lookup/build_db.py`
+
 ---
 
 ## 🔌 OpenAI 兼容接口

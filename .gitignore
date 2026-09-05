@@ -14,3 +14,6 @@ key.pem
 # 本地角色库与源数据（体积超 GitHub 单文件限制，克隆后自行重建）
 character_lookup/characters.db
 character_lookup/danbooru_character.csv
+# 由 import_zh_names.py 从外部数据集生成的本地中文名映射（运行时产物）
+character_lookup/zh_names.json
+character_lookup/zh_works.json

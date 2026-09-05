@@ -23,6 +23,14 @@ from .query import exact_slug, extract_english_terms, lookup_multi
 ALIASES_FILE = os.environ.get(
     "CHARACTER_ALIASES", str(Path(__file__).with_name("aliases.json")))
 
+# 大容量中文名映射（由 import_zh_names.py 从开源数据集导入，数万条）。
+# 与 aliases.json（手工 + 自动学习，3000 上限）分开存放，互不干扰。
+ZH_FILE = os.environ.get(
+    "CHARACTER_ZH", str(Path(__file__).with_name("zh_names.json")))
+
+_zh_cache: dict = {"data": None, "mtime": 0.0}
+_zh_lock = threading.RLock()
+
 # 常见中文简称/系列词 -> 不需要单独成角色，但参与版权匹配时用
 _SERIES_HINTS = {
     "碧蓝档案": "blue_archive", "ba": "blue_archive", "蔚蓝档案": "blue_archive",
@@ -91,6 +99,45 @@ def match_aliases(text: str) -> list[tuple[str, str]]:
 
 
 # --------------------------------------------------------------------- #
+# 大容量中文名映射（导入数据集，独立于手工别名表）
+# --------------------------------------------------------------------- #
+def load_zh_names() -> dict:
+    """读取 zh_names.json 并做 mtime 缓存（文件可能数 MB，避免每请求重读）。"""
+    global _zh_cache
+    try:
+        mtime = os.path.getmtime(ZH_FILE)
+    except OSError:
+        return {}
+    with _zh_lock:
+        if _zh_cache["data"] is not None and _zh_cache["mtime"] == mtime:
+            return _zh_cache["data"]
+        try:
+            with open(ZH_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                data = {}
+        except Exception:
+            data = {}
+        _zh_cache = {"data": data, "mtime": mtime}
+        return data
+
+
+def match_zh_names(text: str) -> list[tuple[str, list[str]]]:
+    """在大容量中文名映射里找命中。返回 [(中文名, [角色tag...])]，最长优先。"""
+    if not text:
+        return []
+    zh = load_zh_names()
+    if not zh:
+        return []
+    hits = []
+    for k, roles in zh.items():
+        if k and roles and k in text:
+            hits.append((k, roles))
+    hits.sort(key=lambda x: len(x[0]), reverse=True)
+    return hits
+
+
+# --------------------------------------------------------------------- #
 # 从一段自由文本中智能查找角色（主入口）
 # --------------------------------------------------------------------- #
 def resolve_from_text(text: str, n: int = 3, strict: bool = False) -> list[dict]:
@@ -122,11 +169,18 @@ def resolve_from_text(text: str, n: int = 3, strict: bool = False) -> list[dict]
                 return loose
             return []
 
-    # b) 别名表
+    # b) 手工别名表（轻量、高可信，优先）
     for _alias, role in match_aliases(text):
         res = lookup_multi(role, n)
         if res:
             return res
+
+    # b2) 大容量中文名映射（开源数据集导入，覆盖数万角色）
+    for _zh, roles in match_zh_names(text):
+        for role in roles:
+            res = lookup_multi(role, n)
+            if res:
+                return res
 
     # c) 英文术语直查
     terms = extract_english_terms(text)
@@ -192,6 +246,13 @@ def debug_report(text: str) -> str:
         lines.append("[b] 中文别名命中: " + ", ".join(f"{k}->{v}" for k, v in alias_hits))
     else:
         lines.append("[b] 中文别名: 未命中")
+
+    zh_hits = match_zh_names(text)
+    if zh_hits:
+        lines.append("[b2] 中文名映射命中: "
+                     + ", ".join(f"{k}->{v}" for k, v in zh_hits))
+    else:
+        lines.append("[b2] 中文名映射(数据集): 未命中")
 
     terms = extract_english_terms(text)
     lines.append(f"[c] 提取英文术语: {terms if terms else '(无)'}")
