@@ -1,31 +1,73 @@
 @echo off
-chcp 65001 >nul
+setlocal
 cd /d "%~dp0"
-title 喵梓二号 - ComfyUI 生图助手
+title Miaozi2 - ComfyUI Bridge
 
 echo ============================================
-echo   喵梓二号  启动器
+echo   Miaozi2 ComfyUI Bridge  Launcher
 echo ============================================
 
-REM ---- 使用本地 venv（若存在） ----
-set "PY=python"
-if exist ".venv\Scripts\python.exe" set "PY=.venv\Scripts\python.exe"
-if exist "venv\Scripts\python.exe" set "PY=venv\Scripts\python.exe"
-
-echo [1/2] 检查并安装依赖...
-"%PY%" -m pip install -r requirements.txt
-if errorlevel 1 (
-    echo 依赖安装失败，请检查网络或 Python 环境
+REM ============ locate a base Python ============
+set "BASE_PY="
+where python >nul 2>nul && set "BASE_PY=python"
+if not defined BASE_PY (
+    if exist "C:\Program Files\Python313\python.exe" set "BASE_PY=C:\Program Files\Python313\python.exe"
+    if not defined BASE_PY if exist "C:\Python313\python.exe" set "BASE_PY=C:\Python313\python.exe"
+)
+if not defined BASE_PY (
+    echo [ERROR] No Python found.
+    echo Please install Python 3.10+ from https://www.python.org
+    echo and tick "Add python.exe to PATH", then run this file again.
+    echo.
     pause
     exit /b 1
 )
+echo Using base Python: %BASE_PY%
 
-echo [2/2] 安装 Chromium（浏览器搜索用，可跳过）...
-"%PY%" -m playwright install chromium 2>nul
+REM ============ ensure project venv ============
+if exist "venv\Scripts\python.exe" (
+    set "PY=venv\Scripts\python.exe"
+    echo Reusing existing venv.
+) else (
+    echo Creating project venv (first run)...
+    "%BASE_PY%" -m venv venv
+    if errorlevel 1 (
+        echo [ERROR] Failed to create venv.
+        pause
+        exit /b 1
+    )
+    set "PY=venv\Scripts\python.exe"
+)
+echo Using Python: %PY%
 
+REM ============ ensure dependencies ============
+"%PY%" -c "import flask, requests, waitress" >nul 2>nul
+if errorlevel 1 (
+    echo Installing dependencies (first run, please wait)...
+    "%PY%" -m pip install --upgrade pip -q
+    "%PY%" -m pip install -r requirements.txt
+    if errorlevel 1 (
+        echo.
+        echo [ERROR] Dependency install failed.
+        echo Check network, then run manually:
+        echo     %PY% -m pip install -r requirements.txt
+        echo.
+        pause
+        exit /b 1
+    )
+) else (
+    echo Dependencies OK.
+)
+
+REM ============ launch ============
 echo.
-echo 启动中... 访问 http://localhost:5000
-echo 关闭本窗口即停止服务
+echo ============================================
+echo   Starting server...
+echo   Open browser:  http://127.0.0.1:5000
+echo   Close this window to stop the server.
 echo ============================================
 "%PY%" app.py
+
+echo.
+echo Server stopped.
 pause
