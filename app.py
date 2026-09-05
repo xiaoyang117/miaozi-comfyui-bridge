@@ -505,12 +505,16 @@ def _run_generation(data: dict):
         history = data.get("history") or []
         search_url_idx = int(data.get("search_url_idx") or 0)
         auto_resolution = bool(data.get("auto_resolution", False))
+        # 直通模式：外部已给标准标签，跳过 LLM 改写与角色搜索，原样提交 ComfyUI
+        raw_prompt = bool(data.get("raw_prompt", False))
+        if raw_prompt:
+            use_search = False
         width = data.get("width") or settings.gen_width
         height = data.get("height") or settings.gen_height
         size_via = "manual"
-        log.info("[%s] params: wf=%s search=%s auto_size=%s size=%sx%s",
+        log.info("[%s] params: wf=%s search=%s auto_size=%s raw=%s size=%sx%s",
                  gid, Path(wf_path).name, use_search, auto_resolution,
-                 width, height)
+                 raw_prompt, width, height)
 
         # ---------- 加载工作流 ----------
         try:
@@ -650,31 +654,47 @@ def _run_generation(data: dict):
                 search_info = {"query": "", "results": "",
                                "error": str(e)}
 
-        # ---------- Step 2: LLM 生成提示词 ----------
+        # ---------- Step 2: LLM 生成提示词（直通模式则跳过） ----------
         yield {"step": "llm"}
         prompt = ""
-        try:
-            if search_info and raw:
-                ctx = f"角色参考资料:\n{raw}\n\n用户需求: {user_input}"
-                prompt = llm._call(PROMPT_WITH_CONTEXT_SPECIFIC, ctx, history)
-            else:
-                sp = PROMPT_SYSTEM_SPECIFIC if use_search \
-                    else llm._prompt_system
-                prompt = llm._call(sp, user_input, history)
-            if not prompt:
-                raise RuntimeError("LLM 返回了空提示词")
-            log.info("[%s] llm prompt ok (%d 字符)", gid, len(prompt))
-        except Exception as e:
-            log.error("[%s] llm prompt failed: %s", gid, e, exc_info=True)
-            yield {"step": "error", "error": f"提示词生成失败: {e}"}
-            return
+        if raw_prompt:
+            # 直通：外部已给标准标签，原样作为正向提示词
+            prompt = user_input
+            log.info("[%s] raw prompt passthrough (%d 字符)", gid,
+                     len(prompt))
+        else:
+            try:
+                if search_info and raw:
+                    ctx = f"角色参考资料:\n{raw}\n\n用户需求: {user_input}"
+                    prompt = llm._call(PROMPT_WITH_CONTEXT_SPECIFIC,
+                                       ctx, history)
+                else:
+                    sp = PROMPT_SYSTEM_SPECIFIC if use_search \
+                        else llm._prompt_system
+                    prompt = llm._call(sp, user_input, history)
+                if not prompt:
+                    raise RuntimeError("LLM 返回了空提示词")
+                log.info("[%s] llm prompt ok (%d 字符)", gid, len(prompt))
+            except Exception as e:
+                log.error("[%s] llm prompt failed: %s", gid, e,
+                          exc_info=True)
+                yield {"step": "error", "error": f"提示词生成失败: {e}"}
+                return
 
         # ---------- Step 2.5: 分辨率自动决策 ----------
         if auto_resolution:
-            width, height, size_via = decide_resolution(user_input, llm,
-                                                        history)
-            log.info("[%s] size auto -> %sx%s (via %s)",
-                     gid, width, height, size_via)
+            if raw_prompt and not _extract_explicit_size(user_input):
+                # 直通模式：prompt 是英文标签不含方向意图，除非显式尺寸，
+                # 否则不调 LLM 判断，直接用默认尺寸（LLM 可能不可用）
+                width, height = settings.gen_width, settings.gen_height
+                size_via = "default(raw)"
+                log.info("[%s] size raw-default -> %sx%s",
+                         gid, width, height)
+            else:
+                width, height, size_via = decide_resolution(user_input, llm,
+                                                            history)
+                log.info("[%s] size auto -> %sx%s (via %s)",
+                         gid, width, height, size_via)
 
         # ---------- Step 3: ComfyUI ----------
         yield {"step": "comfyui"}

@@ -130,16 +130,21 @@ def register_openai(app, run_generation, settings_obj, gen_lock, outputs_dir):
 
         size = body.get("size") or ""
         wh = _parse_size(size)
+        # 直通模式：prompt 视为标准标签，不做 LLM 改写 / 角色搜索
+        raw_prompt = bool(body.get("raw_prompt", False))
         # 私有扩展字段（OpenAI 客户端不会发，但脚本可用来控制角色识别）
         role = (body.get("role") or "").strip()
         # OpenAI 的 prompt 通常是完整英文标签，默认不做角色搜索（避免误匹配）；
         # 传入 role 或 use_search=true 时才启用角色库增强。
         use_search = bool(body.get("use_search", False)) or bool(role)
+        if raw_prompt:
+            use_search = False
 
         data = {
             "prompt": prompt,
             "use_search": use_search,
             "role": role,
+            "raw_prompt": raw_prompt,
             "workflow_path": body.get("workflow_path")
                              or settings_obj.workflow_path,
         }
@@ -161,7 +166,8 @@ def register_openai(app, run_generation, settings_obj, gen_lock, outputs_dir):
             data["image"] = imgs
 
         log_mod.info("openai images/generations model=%s size=%r n=%s "
-                     "search=%s", model, size, n, use_search)
+                     "search=%s raw=%s", model, size, n, use_search,
+                     raw_prompt)
 
         created = int(time.time())
         data_items = []

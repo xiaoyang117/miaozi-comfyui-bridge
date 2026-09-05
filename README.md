@@ -113,6 +113,14 @@ resp2 = client.images.generate(
     role="白子",                          # 手动指定角色（可选）
     use_search=True,                      # 开启角色搜索（可选）
 )
+
+# 直通模式：已给标准标签，完全跳过 LLM（不依赖 LLM 服务）
+resp3 = client.images.generate(
+    model="dall-e-3",
+    prompt="1girl, shiroko, blue archive, swimsuit, masterpiece",
+    size="1024x1024",
+    raw_prompt=True,                      # 原样提交给 ComfyUI，不经过 LLM
+)
 ```
 
 端点一览：
@@ -122,7 +130,12 @@ resp2 = client.images.generate(
 | `GET  /v1/models` | 模型列表（miaozi-image-xl / dall-e-3 兼容别名） |
 | `POST /v1/images/generations` | 文生图。参数 `prompt / model / size / n / response_format` 均按 OpenAI 规范 |
 
-扩展参数（非标准，OpenAI 客户端忽略、脚本可用）：`role`（指定角色）、`use_search`（角色库搜索，默认关）、`workflow_path`、`image`（参考图 base64 列表）。
+扩展参数（非标准，OpenAI 客户端忽略、脚本可用）：`role`（指定角色）、`use_search`（角色库搜索，默认关）、`workflow_path`、`image`（参考图 base64 列表）、`raw_prompt`（直通模式，见下）。
+
+**直通模式（`raw_prompt: true`）**：默认链路会把传入文本交给 LLM 改写为提示词再出图；
+若外部程序已经提供了标准英文标签、不希望经过 LLM（例如 LLM 服务未配置），
+设置 `raw_prompt: true` 即可跳过 LLM 提示词改写与角色搜索，**把 prompt 原样提交给 ComfyUI**。
+直通模式下 `size: "auto"` 也不会调用 LLM，直接采用默认尺寸。
 
 可选鉴权：设置环境变量 `MIAOZI_API_KEY` 后，客户端必须带 `Authorization: Bearer <key>`。
 
