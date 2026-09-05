@@ -719,6 +719,10 @@ async function sendMessage() {
 
     let response;
     const roleTag = document.getElementById('chat_role').value.trim();
+    // fetch 建立超时：60s 连响应头都收不到（服务无响应/连接被占）则中止并报错
+    const fetchCtrl = new AbortController();
+    const fetchTimer = setTimeout(() => fetchCtrl.abort(), 60000);
+    try {
     for (let attempt=1; attempt<=90; attempt++) {
       response = await fetch('/api/generate', {
         method:'POST', headers:{'Content-Type':'application/json'},
@@ -730,16 +734,20 @@ async function sendMessage() {
           auto_resolution: !!res.auto,
           width: res.width, height: res.height,
           image: hasImage ? imageData : [],
-        })
+        }),
+        signal: fetchCtrl.signal,
       });
       const ct = response.headers.get('content-type')||'';
-      if (ct.includes('text/event-stream')) { hideStep(); break; }
+      if (ct.includes('text/event-stream')) { clearTimeout(fetchTimer); hideStep(); break; }
       const d = await response.json();
       if (d.queue) {
         showQueueState(attempt);
         await new Promise(r=>setTimeout(r,2000)); continue;
       }
       break;
+    }
+    } finally {
+      clearTimeout(fetchTimer);
     }
 
     const ct = response.headers.get('content-type')||'';
@@ -758,8 +766,12 @@ async function sendMessage() {
     document.getElementById('stepText').textContent = '🚀 已连接，开始执行…';
     const reader = response.body.getReader(); const decoder = new TextDecoder();
     let buffer='', result=null, failed=null;
+    // 流已建立后的整体看门狗：60s 无任何事件则视为异常（正常 LLM 会持续有秒数跳动）
+    const watchdog = setTimeout(() => { reader.cancel().catch(()=>{}); }, 60000);
+    try {
     while (true) {
       const {done,value} = await reader.read(); if (done) break;
+      clearTimeout(watchdog);
       buffer += decoder.decode(value,{stream:true});
       const lines = buffer.split('\n'); buffer = lines.pop()||'';
       for (const line of lines) {
@@ -772,6 +784,10 @@ async function sendMessage() {
         } else if (st==='done') { result = evt; finishSteps(true, '✅ 生成完成'); }
         else if (st==='error') { failed = evt; finishSteps(false, '❌ ' + (evt.error||'失败')); throw new Error(evt.error); }
       }
+      clearTimeout(watchdog);
+    }
+    } finally {
+      clearTimeout(watchdog);
     }
     if (result) {
       chatHistory.push({role:'assistant',content:result.prompt});
@@ -787,7 +803,9 @@ async function sendMessage() {
     } else { throw new Error(failed ? failed.error : '未收到完成事件'); }
   } catch(e) {
     rollbackLast();
-    const errMsg = e.message || '生成失败';
+    const errMsg = (e && e.name === 'AbortError')
+      ? '服务器 60 秒无响应（可能是服务未启动或正忙）。请确认服务后重试'
+      : (e.message || '生成失败');
     _endProgress(false, errMsg.slice(0, 90));
     finishSteps(false, '❌ ' + errMsg);
     addChatBubble('assistant', '⚠️ 错误: ' + errMsg);
