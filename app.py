@@ -873,6 +873,17 @@ def api_logs_frontend():
     return jsonify({"success": True})
 
 
+# ====================================================================== #
+# OpenAI 兼容接口注册
+# ====================================================================== #
+try:
+    from openai_api import register_openai
+    register_openai(app, _run_generation, settings, _gen_lock, OUTPUTS_DIR)
+    log.info("OpenAI 兼容接口已启用: /v1/models, /v1/images/generations")
+except Exception as e:
+    log.error("OpenAI 兼容接口注册失败: %s", e, exc_info=True)
+
+
 if __name__ == "__main__":
     import os as _os
     import waitress
@@ -896,6 +907,8 @@ if __name__ == "__main__":
     print(f"  局域网:    http://<your-ip>:{port}")
     print("  健康检查:  /api/health")
     print("  同步生图:  POST /api/generate/sync")
+    print("  OpenAI兼容: /v1/images/generations (base_url: "
+          f"http://127.0.0.1:{port}/v1)")
     print("=" * 46)
 
     # 多端口：waitress 每个端口一个 serve 线程

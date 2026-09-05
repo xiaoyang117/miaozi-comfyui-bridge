@@ -84,10 +84,58 @@ python app.py
 
 ---
 
+## 🔌 OpenAI 兼容接口
+
+服务内置 **OpenAI Images API 兼容层**，任何标准 OpenAI 客户端（Python / JS / curl 等）
+只需把 `base_url` 指向本服务即可直接调用生图，完全复用角色的中文识别 + 本地角色库增强。
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:5000/v1",  # 指向本服务
+    api_key="miaozi",                     # 未配置 MIAOZI_API_KEY 时可任意填
+)
+
+# 生图（url 模式）
+resp = client.images.generate(
+    model="dall-e-3",                     # 任意 model 均接受
+    prompt="shiroko, blue archive, swimsuit",
+    size="1024x1024",                     # 或 "auto" 交给 AI 决定
+    response_format="url",                # 或 "b64_json"
+)
+print(resp.data[0].url)
+
+# 启用本地角色库增强：传私有扩展参数
+resp2 = client.images.generate(
+    model="miaozi-image-xl",
+    prompt="碧蓝档案的白子 穿泳装",        # 中文描述也可
+    role="白子",                          # 手动指定角色（可选）
+    use_search=True,                      # 开启角色搜索（可选）
+)
+```
+
+端点一览：
+
+| 端点 | 说明 |
+|---|---|
+| `GET  /v1/models` | 模型列表（miaozi-image-xl / dall-e-3 兼容别名） |
+| `POST /v1/images/generations` | 文生图。参数 `prompt / model / size / n / response_format` 均按 OpenAI 规范 |
+
+扩展参数（非标准，OpenAI 客户端忽略、脚本可用）：`role`（指定角色）、`use_search`（角色库搜索，默认关）、`workflow_path`、`image`（参考图 base64 列表）。
+
+可选鉴权：设置环境变量 `MIAOZI_API_KEY` 后，客户端必须带 `Authorization: Bearer <key>`。
+
+> 注意：OpenAI 兼容层的 `prompt` 通常已是完整英文标签，故默认不自动做角色搜索
+> （避免把长描述误当角色）；需要中文角色识别时传 `use_search: true` 或 `role`。
+
+---
+
 ## 📁 项目结构
 
 ```
-app.py                 # Flask 后端 + SSE 生成流程
+app.py                 # Flask 后端 + SSE 生成流程 + OpenAI 兼容层注册
+openai_api.py          # OpenAI 兼容接口层（/v1/images/generations 等）
 settings.py            # 配置中心（读写 settings.json）
 comfyui/client.py      # ComfyUI 客户端（提交/轮询/下载/尺寸改写）
 llm/                   # LLM/VLM 客户端 + 搜索
