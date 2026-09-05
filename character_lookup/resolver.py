@@ -27,8 +27,12 @@ ALIASES_FILE = os.environ.get(
 # 与 aliases.json（手工 + 自动学习，3000 上限）分开存放，互不干扰。
 ZH_FILE = os.environ.get(
     "CHARACTER_ZH", str(Path(__file__).with_name("zh_names.json")))
+# 作品中文名 -> copyright tag（同一导入器产出，用于同名角色的作品消歧）
+ZH_WORK_FILE = os.environ.get(
+    "CHARACTER_ZH_WORK", str(Path(__file__).with_name("zh_works.json")))
 
 _zh_cache: dict = {"data": None, "mtime": 0.0}
+_zw_cache: dict = {"data": None, "mtime": 0.0}
 _zh_lock = threading.RLock()
 
 # 常见中文简称/系列词 -> 不需要单独成角色，但参与版权匹配时用
@@ -141,6 +145,67 @@ def match_zh_names(text: str) -> list[tuple[str, list[str]]]:
     return hits
 
 
+def load_zh_works() -> dict:
+    """读取 zh_works.json（作品中文名 -> [copyright tag]），mtime 缓存。"""
+    global _zw_cache
+    try:
+        mtime = os.path.getmtime(ZH_WORK_FILE)
+    except OSError:
+        return {}
+    with _zh_lock:
+        if _zw_cache["data"] is not None and _zw_cache["mtime"] == mtime:
+            return _zw_cache["data"]
+        try:
+            with open(ZH_WORK_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                data = {}
+        except Exception:
+            data = {}
+        _zw_cache = {"data": data, "mtime": mtime}
+        return data
+
+
+def _prefer_copyrights(text: str) -> set[str]:
+    """从输入文本里找出『作品线索』对应的 copyright 标签集合。
+
+    来源：作品中文名表(zh_works)、内置系列词、输入中的英文版权词。
+    仅用于同名角色的排序偏好，找不到也无需回退。
+    """
+    if not text:
+        return set()
+    pref: set[str] = set()
+    low = text.lower()
+    # 1) 作品中文名表（碧蓝航线的长门 -> azur_lane）
+    n = len(low)
+    for wk, cps in load_zh_works().items():
+        if len(wk) <= n and wk in low and cps:
+            pref.update(cps)
+    # 2) 内置系列词
+    for cn, cp in _SERIES_HINTS.items():
+        if cn and cn in low:
+            pref.add(cp)
+    # 3) 输入里直接出现的英文版权词（不过滤版权停用词；
+    #    仅与候选 copyright 精确比对才生效，故无副作用）
+    for t in re.findall(r"[a-z][a-z0-9_]{2,}", low):
+        pref.add(t)
+    return pref
+
+
+def _disambiguate(cands: list[dict], text: str) -> list[dict]:
+    """同名多作品角色消歧：作品线索命中者排前（如 长门 kancolle/azur_lane）。"""
+    if len(cands) < 2 or not text:
+        return cands
+    pref = _prefer_copyrights(text)
+    if not pref:
+        return cands
+    hit = [c for c in cands if (c.get("copyright") or "") in pref]
+    rest = [c for c in cands if (c.get("copyright") or "") not in pref]
+    if hit:
+        return hit + rest
+    return cands
+
+
 # --------------------------------------------------------------------- #
 # 从一段自由文本中智能查找角色（主入口）
 # --------------------------------------------------------------------- #
@@ -199,14 +264,17 @@ def resolve_from_text(text: str, n: int = 3, strict: bool = False) -> list[dict]
     for _alias, role in match_aliases(text):
         res = _lookup_role(role, n)
         if res:
-            return res
+            return _disambiguate(res, text)
 
     # b2) 大容量中文名映射（开源数据集导入，覆盖数万角色）
     for _zh, roles in match_zh_names(text):
-        for role in roles:
+        found: list[dict] = []
+        for role in roles[:10]:
             res = _lookup_role(role, n)
-            if res:
-                return res
+            if res and res[0].get("character") not in {x.get("character") for x in found}:
+                found.append(res[0])
+        if found:
+            return _disambiguate(found, text)[:n]
 
     # c) 英文术语直查
     terms = extract_english_terms(text)
@@ -222,7 +290,7 @@ def resolve_from_text(text: str, n: int = 3, strict: bool = False) -> list[dict]
     if collected:
         if strict and not _confidence_ok(" ".join(terms), collected[0]):
             return []
-        return collected[:n]
+        return _disambiguate(collected[:n], text)
 
     # d) 中文 -> 系列词线索：把中文描述里的作品线索和相邻英文结合
     return []

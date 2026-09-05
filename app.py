@@ -665,6 +665,7 @@ def _run_generation(data: dict):
                     best = cands[0]
                     search_info = {
                         "query": best.get("character", ""),
+                        "copyright": best.get("copyright", ""),
                         "via": via,
                         "role_missed": role_missed,
                         "candidates": [c.get("character", "")
@@ -711,6 +712,18 @@ def _run_generation(data: dict):
                     prompt = llm._call(sp, user_input, history)
                 if not prompt:
                     raise RuntimeError("LLM 返回了空提示词")
+                # 角色已命中但 LLM 漏输出角色标签时，前置注入（确定性兜底，
+                # 保证角色名与作品名一定进入提示词）
+                if search_info and search_info.get("query"):
+                    ctag = search_info.get("query", "").lower()
+                    main = ctag.split("(")[0].strip("_")
+                    if main and main not in prompt.lower()[:120]:
+                        cp = search_info.get("copyright", "")
+                        prompt = ((f"{search_info['query']}, {cp}, {prompt}"
+                                   if cp else
+                                   f"{search_info['query']}, {prompt}"))
+                        log.info("[%s] 角色标签缺失，已注入前缀: %s",
+                                 gid, search_info["query"])
                 log.info("[%s] llm prompt ok (%d 字符)", gid, len(prompt))
                 yield {"step": "llm", "msg": "✓ 提示词已生成"}
             except Exception as e:
