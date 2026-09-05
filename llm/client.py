@@ -128,7 +128,9 @@ class LLMClient:
         except requests.exceptions.ConnectionError:
             raise RuntimeError(f"无法连接到 LLM API ({self.base_url})")
         except requests.exceptions.Timeout:
-            raise RuntimeError("LLM API 请求超时")
+            raise RuntimeError(
+                "LLM API 请求超时（120 秒）。本地大模型推理较慢时请稍后重试，"
+                "或确认模型服务未被其他任务占满")
 
         raw = resp.text
         if resp.status_code in (401, 403):

@@ -698,7 +698,8 @@ def _run_generation(data: dict):
             log.info("[%s] raw prompt passthrough (%d 字符)", gid,
                      len(prompt))
         else:
-            yield {"step": "llm", "msg": "🧠 LLM 生成提示词…"}
+            yield {"step": "llm",
+                   "msg": "🧠 生成提示词中（本地模型较慢，通常 30~60 秒，请耐心）…"}
             try:
                 if search_info and raw:
                     ctx = f"角色参考资料:\n{raw}\n\n用户需求: {user_input}"
