@@ -124,14 +124,18 @@ def load_zh_names() -> dict:
 
 def match_zh_names(text: str) -> list[tuple[str, list[str]]]:
     """在大容量中文名映射里找命中。返回 [(中文名, [角色tag...])]，最长优先。"""
-    if not text:
+    if not text or not re.search(r"[\u4e00-\u9fff]", text):
         return []
     zh = load_zh_names()
     if not zh:
         return []
+    n = len(text)
     hits = []
     for k, roles in zh.items():
-        if k and roles and k in text:
+        # 字符串包含前提：key 不能比 text 长；同长度也需 k == text 才可能包含
+        if len(k) > n or not roles:
+            continue
+        if k in text:
             hits.append((k, roles))
     hits.sort(key=lambda x: len(x[0]), reverse=True)
     return hits
@@ -140,6 +144,28 @@ def match_zh_names(text: str) -> list[tuple[str, list[str]]]:
 # --------------------------------------------------------------------- #
 # 从一段自由文本中智能查找角色（主入口）
 # --------------------------------------------------------------------- #
+_TAG_LIKE = re.compile(r"^[a-z0-9_]+(?:\([a-z0-9_]+\))?$")
+
+
+def _lookup_role(role: str, n: int = 3) -> list[dict]:
+    """按别名/映射里的角色值查库。
+
+    - 纯标签形态（shiroko_(blue_archive)）：只做精确匹配；精确失败即视为
+      死值/拼写错，直接跳过（不做全表模糊 OR —— 曾导致 600ms+ 与串味）。
+    - 自由文本（含空格/描述）：交给模糊匹配。
+    """
+    role = (role or "").strip()
+    if not role:
+        return []
+    slug = role.lower().replace(" ", "_")
+    hit = exact_slug(slug)
+    if hit:
+        return [hit]
+    if _TAG_LIKE.match(slug):
+        return []
+    return lookup_multi(role, n)
+
+
 def resolve_from_text(text: str, n: int = 3, strict: bool = False) -> list[dict]:
     """尽力从文本中解析出角色，返回候选角色 dict 列表（可为空）。
 
@@ -171,14 +197,14 @@ def resolve_from_text(text: str, n: int = 3, strict: bool = False) -> list[dict]
 
     # b) 手工别名表（轻量、高可信，优先）
     for _alias, role in match_aliases(text):
-        res = lookup_multi(role, n)
+        res = _lookup_role(role, n)
         if res:
             return res
 
     # b2) 大容量中文名映射（开源数据集导入，覆盖数万角色）
     for _zh, roles in match_zh_names(text):
         for role in roles:
-            res = lookup_multi(role, n)
+            res = _lookup_role(role, n)
             if res:
                 return res
 

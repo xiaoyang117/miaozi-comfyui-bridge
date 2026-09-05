@@ -131,15 +131,27 @@ def _iter_from_sqlite(path: Path):
 def _iter_from_csv(path: Path):
     import csv as _csv
     with open(path, encoding="utf-8", newline="") as f:
-        sample = f.read(4096)
+        sample = f.read(8192)
         f.seek(0)
-        has_header = _csv.Sniffer().has_header(sample) if sample else False
+        # 表头判定：须能嗅探出表头，且表头含中英"名字/中文"标识词，否则按无表头两列读
+        has_header = False
+        try:
+            if _csv.Sniffer().has_header(sample):
+                f.seek(0)
+                first = next(_csv.reader(f), []) or []
+                if any(str(c).strip().lower() in
+                       ("name", "tag", "character", "english", "cn", "zh",
+                        "chinese", "cn_name", "zh_name", "中文", "翻译")
+                       for c in first):
+                    has_header = True
+        except Exception:
+            has_header = False
+        f.seek(0)
         reader = _csv.DictReader(f) if has_header else None
         if reader is None:
             # 无表头：按两列 (name, cn) 读
-            f.seek(0)
             for row in _csv.reader(f):
-                if len(row) >= 2:
+                if len(row) >= 2 and (row[0] or "").strip():
                     yield {"name": (row[0] or "").strip(),
                            "cn": (row[1] or "").strip(), "cat": None}
             return
@@ -166,7 +178,7 @@ def import_file(path: Path, db_path: Path,
     print(f"\n=== 处理 {path.name} ===")
     if path.suffix.lower() in (".sqlite", ".db", ".sqlite3"):
         it = _iter_from_sqlite(path)
-    elif path.suffix.lower() == ".csv":
+    elif path.suffix.lower() in (".csv", ".txt"):
         it = _iter_from_csv(path)
     else:
         print(f"[跳过] 不支持的扩展名: {path.suffix}")
@@ -227,7 +239,7 @@ def main() -> None:
     stats = {"角色映射": 0, "作品映射": 0, "未入本库跳过": 0}
 
     files = [src] if src.is_file() else sorted(
-        p for p in src.iterdir() if p.suffix.lower() in (".sqlite", ".db", ".csv"))
+        p for p in src.iterdir() if p.suffix.lower() in (".sqlite", ".db", ".csv", ".txt"))
     if not files:
         sys.exit(f"目录里没有 .sqlite/.db/.csv 文件: {src}")
     for p in files:
