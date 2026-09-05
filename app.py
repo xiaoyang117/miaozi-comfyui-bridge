@@ -8,9 +8,11 @@
 - 对话框可随时选择分辨率预设，提交前自动改写 EmptyLatentImage
 - 更清晰的 SSE 事件与错误提示
 """
+import itertools
 import json
 import os
 import threading
+import time
 from pathlib import Path
 
 import requests as _req
@@ -40,6 +42,75 @@ app.secret_key = "comfyui-bridge-secret"
 
 # 单个应用实例内同时只允许一次生成，避免排队混乱
 _gen_lock = threading.Lock()
+
+# --------------------------------------------------------------------- #
+# 任务注册表：记录每次生成任务（含 API / OpenAI 触发）的实时状态，
+# 供网页「任务」面板轮询展示。内存态，重启即清空。
+# --------------------------------------------------------------------- #
+_TASKS_LOCK = threading.Lock()
+_TASKS: dict = {}
+_TASK_SEQ = itertools.count(1)
+_TASK_SOURCE_LABEL = {"web": "Web", "sync": "同步API", "openai": "OpenAI兼容"}
+
+
+def task_begin(source: str) -> str:
+    """登记一个新任务，返回 task_id。"""
+    tid = f"T{next(_TASK_SEQ):04d}"
+    with _TASKS_LOCK:
+        _TASKS[tid] = {
+            "id": tid,
+            "source": source,
+            "source_label": _TASK_SOURCE_LABEL.get(source, source),
+            "status": "running",          # running / done / error
+            "step": "",                    # 当前阶段名
+            "step_index": -1,              # 对应前端 chip 序号
+            "msg": "排队等待…",
+            "image": None,
+            "prompt": "",
+            "started": time.time(),
+            "finished": None,
+            "cost": None,
+        }
+    return tid
+
+
+def task_update(tid: str, **kw):
+    """更新任务字段（失败静默）。"""
+    if not tid:
+        return
+    with _TASKS_LOCK:
+        t = _TASKS.get(tid)
+        if not t:
+            return
+        t.update({k: v for k, v in kw.items() if v is not None})
+        t["step_index"] = _STEP_CHIP.get(t.get("step", ""), -1)
+
+
+def task_finish(tid: str, ok: bool, msg: str = "", **kw):
+    """任务结束：done/error + 耗时。"""
+    if not tid:
+        return
+    with _TASKS_LOCK:
+        t = _TASKS.get(tid)
+        if not t:
+            return
+        t["status"] = "done" if ok else "error"
+        t["msg"] = msg or t.get("msg", "")
+        t["finished"] = time.time()
+        t["cost"] = round(t["finished"] - t.get("started", t["finished"]), 1)
+        t.update({k: v for k, v in kw.items() if v is not None})
+
+
+def api_tasks():
+    """列出任务（新的在前）。"""
+    with _TASKS_LOCK:
+        items = sorted(_TASKS.values(),
+                       key=lambda x: x.get("started", 0), reverse=True)
+        return items[:100]
+
+
+# SSE step -> 面板 chip 序号（与前端 STEP_MAP 对应）
+_STEP_CHIP = {"vlm": 0, "search": 1, "llm": 2, "size": 3, "comfyui": 4}
 
 
 @app.before_request
@@ -786,6 +857,40 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _generation_with_task(data: dict, source: str):
+    """包一层任务登记：随事件流更新任务注册表，结束自动登记结果。
+
+    三个入口（Web SSE / 同步 API / OpenAI 兼容）统一走这里，
+    因此被 API 触发或 OpenAI 触发的生成，也会出现在网页「任务」面板。
+    """
+    tid = task_begin(source)
+    try:
+        for ev in _run_generation(data):
+            step = ev.get("step")
+            if step in ("vlm", "search", "llm", "size", "comfyui"):
+                task_update(tid, step=step, msg=ev.get("msg") or "")
+            elif step == "done":
+                task_finish(tid, True, msg="✅ 生成完成",
+                            image=ev.get("image"),
+                            prompt=(ev.get("prompt") or "")[:80])
+                yield ev
+            elif step == "error":
+                task_finish(tid, False, msg=f"❌ {ev.get('error', '失败')}")
+                yield ev
+            else:
+                yield ev
+    except GeneratorExit:
+        # 客户端断开：任务标记中断（不覆盖已 done）
+        with _TASKS_LOCK:
+            t = _TASKS.get(tid)
+            if t and t.get("status") == "running":
+                t["status"] = "error"
+                t["msg"] = "⏹ 已中断（客户端断开）"
+                t["finished"] = time.time()
+        raise
+
+
+
 # ====================================================================== #
 # 生成接口：SSE 流（供前端） + 同步 JSON（供外部程序）
 # ====================================================================== #
@@ -797,7 +902,7 @@ def generate():
     def event_stream():
         data = request.get_json() or {}
         try:
-            for ev in _run_generation(data):
+            for ev in _generation_with_task(data, "web"):
                 yield _sse(ev)
         finally:
             _gen_lock.release()
@@ -831,7 +936,7 @@ def generate_sync():
     data = request.get_json() or {}
     result = None
     try:
-        for ev in _run_generation(data):
+        for ev in _generation_with_task(data, "sync"):
             if ev.get("step") == "done":
                 result = ev
             elif ev.get("step") == "error":
@@ -938,12 +1043,27 @@ def api_logs_frontend():
     return jsonify({"success": True})
 
 
+@app.route("/api/tasks", methods=["GET"])
+def api_task_list():
+    """任务面板数据：返回全部生成任务（含 API/OpenAI 触发）的实时状态。"""
+    return jsonify({"success": True, "tasks": api_tasks()})
+
+
+@app.route("/api/tasks", methods=["DELETE"])
+def api_task_clear():
+    """清空任务记录。"""
+    with _TASKS_LOCK:
+        _TASKS.clear()
+    return jsonify({"success": True})
+
+
 # ====================================================================== #
 # OpenAI 兼容接口注册
 # ====================================================================== #
 try:
     from openai_api import register_openai
-    register_openai(app, _run_generation, settings, _gen_lock, OUTPUTS_DIR)
+    register_openai(app, lambda data: _generation_with_task(data, "openai"),
+                    settings, _gen_lock, OUTPUTS_DIR)
     log.info("OpenAI 兼容接口已启用: /v1/models, /v1/images/generations")
 except Exception as e:
     log.error("OpenAI 兼容接口注册失败: %s", e, exc_info=True)

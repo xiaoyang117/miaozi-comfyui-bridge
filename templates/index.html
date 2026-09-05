@@ -15,6 +15,7 @@
     <nav class="tabs">
       <button class="tab active" data-tab="chat" onclick="switchTab('chat')">对话</button>
       <button class="tab" data-tab="settings" onclick="switchTab('settings')">配置</button>
+      <button class="tab" data-tab="tasks" onclick="switchTab('tasks');loadTasks()">📊 任务</button>
       <button class="tab" data-tab="logs" onclick="switchTab('logs');loadLogs()">📜 日志</button>
     </nav>
   </div>
@@ -232,6 +233,26 @@
     <p class="field-hint" style="padding:6px 2px">
       日志自动写入项目根目录 <code>logs/app.log</code>（按 5MB 轮转，保留 5 份）。
       前端 JS 错误也会自动上报到这里。排查 Bug 时可把日志复制给开发者。
+    </p>
+  </div>
+
+  <!-- ================= 任务面板 ================= -->
+  <div id="panel-tasks" class="panel">
+    <div class="log-toolbar">
+      <div style="display:flex;gap:8px;align-items:center;flex:1">
+        <button class="btn-secondary" onclick="loadTasks()">↻ 刷新</button>
+        <label class="toggle-label" style="font-size:.8rem">
+          <input type="checkbox" id="taskAutoRefresh" checked>
+          <span class="toggle-slider"></span>自动刷新
+        </label>
+        <span id="taskMeta" style="font-size:.74rem;color:var(--text-faint)"></span>
+      </div>
+      <button class="btn-secondary" onclick="clearTasks()">清空记录</button>
+    </div>
+    <div id="taskList" class="task-list"></div>
+    <p class="field-hint" style="padding:6px 2px">
+      显示所有生成任务（Web 页面、同步 API、OpenAI 兼容触发均会登记），
+      可实时查看每一步进度与耗时。任务记录在内存中，重启服务后清空。
     </p>
   </div>
 </div>
@@ -997,7 +1018,75 @@ function startLogAutoRefresh() {
 document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('logAutoRefresh').addEventListener('change', startLogAutoRefresh);
   startLogAutoRefresh();
+  document.getElementById('taskAutoRefresh').addEventListener('change', startTaskAutoRefresh);
+  startTaskAutoRefresh();
 });
+
+// ================= 任务面板 =================
+const TASK_CHIP = ['识别','角色','提示词','尺寸','出图'];
+let taskTimer = null;
+async function loadTasks() {
+  try {
+    const r = await fetch('/api/tasks');
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || '加载失败');
+    renderTasks(d.tasks || []);
+    const meta = document.getElementById('taskMeta');
+    meta.textContent = `共 ${(d.tasks||[]).length} 条`;
+  } catch(e) { console.warn('task load error', e); }
+}
+function taskStatusHtml(t) {
+  if (t.status === 'done') return '<span class="task-badge task-done">✓ 完成</span>';
+  if (t.status === 'error') return '<span class="task-badge task-err">✗ 失败</span>';
+  return '<span class="task-badge task-run">● 生成中</span>';
+}
+function renderTasks(tasks) {
+  const list = document.getElementById('taskList');
+  list.innerHTML = '';
+  if (!tasks.length) {
+    list.innerHTML = '<div class="task-empty">暂无任务</div>';
+    return;
+  }
+  tasks.forEach(t => {
+    const row = document.createElement('div');
+    row.className = 'task-row';
+    const chips = TASK_CHIP.map((label, i) => {
+      let cls = 'tch';
+      if (t.status === 'done') cls += ' done';
+      else if (t.status === 'error') cls += (i < t.step_index ? ' done' : '');
+      else cls += (i === t.step_index ? ' active' : (i < t.step_index ? ' done' : ''));
+      return `<span class="${cls}">${label}</span>`;
+    }).join('');
+    const img = t.image
+      ? `<img class="task-thumb" src="${t.image}?cb=${Math.random().toString(36).slice(2,5)}" title="点击放大" onclick="showImageModal('${t.image}')">`
+      : '<span class="task-thumb-empty">—</span>';
+    const costTxt = t.cost != null ? `${t.cost}s` : (t.status==='running' ? '进行中' : '—');
+    row.innerHTML = `
+      <div class="task-left">
+        <div class="task-head">
+          <span class="task-id">${escapeHtml(t.id)}</span>
+          <span class="task-src">${escapeHtml(t.source_label||t.source||'')}</span>
+          ${taskStatusHtml(t)}
+          <span class="task-cost">⏱ ${costTxt}</span>
+        </div>
+        <div class="task-msg">${escapeHtml(t.msg||'')}</div>
+        <div class="task-chips">${chips}</div>
+      </div>
+      <div class="task-right">${img}</div>`;
+    list.appendChild(row);
+  });
+}
+function startTaskAutoRefresh() {
+  if (taskTimer) clearInterval(taskTimer);
+  const cb = document.getElementById('taskAutoRefresh');
+  if (cb && cb.checked) taskTimer = setInterval(() => {
+    if (document.getElementById('panel-tasks').classList.contains('active')) loadTasks();
+  }, 2000);
+}
+function clearTasks() {
+  if (!confirm('清空任务记录？')) return;
+  fetch('/api/tasks', { method: 'DELETE' }).then(() => loadTasks());
+}
 
 // ================= 前端错误自动上报 =================
 function reportFrontendError(msg, source, lineno, colno, error) {

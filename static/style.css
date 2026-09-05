@@ -88,6 +88,7 @@ body {
 .panel.active { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 #panel-settings { overflow-y: auto; padding: 4px 2px 20px; gap: 0; }
 #panel-logs { overflow-y: auto; padding: 4px 2px 20px; gap: 0; }
+#panel-tasks { overflow-y: auto; padding: 4px 2px 20px; gap: 0; }
 .log-toolbar {
   display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
   background: var(--bg-elev); border: 1px solid var(--border-soft);
@@ -100,6 +101,51 @@ body {
   font-size: .76rem; line-height: 1.55; color: var(--text-dim);
   white-space: pre-wrap; word-break: break-all;
   min-height: 300px; max-height: 62vh; overflow-y: auto;
+}
+
+/* ---- 任务面板 ---- */
+.task-list { display: flex; flex-direction: column; gap: 8px; }
+.task-row {
+  display: flex; gap: 12px; align-items: center;
+  background: var(--bg-elev); border: 1px solid var(--border-soft);
+  border-radius: var(--radius); padding: 10px 14px;
+}
+.task-left { flex: 1; min-width: 0; }
+.task-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.task-id { font-family: Consolas, Menlo, monospace; font-size: .78rem; color: var(--text-dim); }
+.task-src {
+  font-size: .7rem; padding: 2px 8px; border-radius: 999px;
+  background: var(--accent-soft); color: #a5b4fc; border: 1px solid rgba(99,102,241,.3);
+}
+.task-badge { font-size: .72rem; padding: 2px 8px; border-radius: 999px; font-weight: 500; }
+.task-done { background: var(--green-soft); color: var(--green); }
+.task-err { background: var(--red-soft); color: #fca5a5; }
+.task-run { background: var(--accent-soft); color: #a5b4fc; animation: pulse 1.2s ease-in-out infinite; }
+.task-cost { font-size: .72rem; color: var(--text-faint); }
+.task-msg {
+  font-size: .8rem; color: var(--text); margin: 5px 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.task-chips { display: flex; gap: 4px; flex-wrap: wrap; }
+.tch {
+  font-size: .68rem; color: var(--text-faint);
+  padding: 2px 7px; border-radius: 999px;
+  background: var(--bg-elev-2); border: 1px solid var(--border-soft);
+}
+.tch.done { color: var(--green); border-color: rgba(34,197,94,.4); }
+.tch.active { color: #fff; background: var(--accent); border-color: transparent; }
+.task-thumb {
+  width: 72px; height: 72px; object-fit: cover; border-radius: 8px;
+  cursor: pointer; border: 1px solid var(--border);
+}
+.task-thumb-empty {
+  width: 72px; height: 72px; border-radius: 8px; border: 1px dashed var(--border);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-faint); font-size: 1.4rem;
+}
+.task-empty {
+  text-align: center; color: var(--text-faint); font-size: .85rem;
+  padding: 40px 0;
 }
 
 /* ============ Chat 面板 ============ */
