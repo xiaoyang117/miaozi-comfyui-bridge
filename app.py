@@ -480,7 +480,249 @@ def test_resolve():
 
 
 # ====================================================================== #
-# 生成主流程（SSE）
+# 生成主流程：核心生成器（SSE 与同步接口共用）
+# ====================================================================== #
+def _run_generation(data: dict):
+    """核心生图生成器：逐条 yield 事件字典。
+
+    事件 step: vlm / search / llm / comfyui / done / error
+    由 /api/generate（SSE 流）与 /api/generate/sync（同步 JSON）共同消费。
+    锁由调用方管理（两个路由各自 acquire/release）。
+    """
+    import uuid as _uuid
+    set_request_id(_uuid.uuid4().hex[:12])  # 本次生成全程共享此 id
+    gid = get_request_id()
+    try:
+        user_input = (data.get("prompt") or "").strip()
+        log.info("[%s] input: %s", gid, user_input[:100])
+        if not user_input:
+            yield {"step": "error", "error": "请输入图片描述"}
+            return
+
+        # ---------- 解析参数 ----------
+        wf_path = data.get("workflow_path") or settings.workflow_path
+        use_search = bool(data.get("use_search", True))
+        history = data.get("history") or []
+        search_url_idx = int(data.get("search_url_idx") or 0)
+        auto_resolution = bool(data.get("auto_resolution", False))
+        width = data.get("width") or settings.gen_width
+        height = data.get("height") or settings.gen_height
+        size_via = "manual"
+        log.info("[%s] params: wf=%s search=%s auto_size=%s size=%sx%s",
+                 gid, Path(wf_path).name, use_search, auto_resolution,
+                 width, height)
+
+        # ---------- 加载工作流 ----------
+        try:
+            wf = load_workflow(wf_path)
+            log.info("[%s] workflow loaded: %s 节点数=%s", gid,
+                     Path(wf_path).name, len(wf))
+        except FileNotFoundError as e:
+            log.error("[%s] workflow not found: %s", gid, e)
+            yield {"step": "error", "error": str(e)}
+            return
+        except Exception as e:
+            log.error("[%s] workflow parse error: %s", gid, e,
+                      exc_info=True)
+            yield {"step": "error", "error": f"工作流解析失败: {e}"}
+            return
+
+        llm = make_llm(search_url_idx=search_url_idx)
+        comfy = make_comfy()
+
+        # ---------- Step 0: VLM ----------
+        image_list = data.get("image") or []
+        if isinstance(image_list, str):
+            image_list = [image_list] if image_list else []
+        vlm_description = None
+        if image_list:
+            yield {"step": "vlm"}
+            log.info("[%s] vlm: %d 张图", gid, len(image_list))
+            try:
+                vlm_description = vlm_analyze(image_list)
+                log.info("[%s] vlm done: %s 字", gid,
+                         len(vlm_description or ""))
+            except RuntimeError as e:
+                log.error("[%s] vlm failed: %s", gid, e)
+                yield {"step": "error", "error": f"图片识别失败: {e}"}
+                return
+            user_input = (f"用户上传了一张图片，以下是图片识别结果：\n"
+                          f"{vlm_description}\n\n用户需求：{user_input}")
+
+        # ---------- Step 1: 角色识别（规则优先，LLM 兜底） ----------
+        search_info = None
+        raw = None
+        role_hint = (data.get("role") or "").strip()
+        if use_search:
+            yield {"step": "search"}
+            cands: list = []
+            via = ""
+            role_missed = False
+            try:
+                # (0) 手动指定角色（最高优先级，完全绕过识别）
+                if role_hint:
+                    cands = char_resolver.resolve_from_text(role_hint,
+                                                            strict=True)
+                    if cands:
+                        via = "手动指定"
+                        # 用户明确给的中文称呼 -> 记住别名
+                        char_resolver.learn(role_hint, cands[0], via)
+                    else:
+                        role_missed = True
+                        # 若输入是自由文本（非纯标签样式），允许结合描述再查一次
+                        if not _looks_like_tag(role_hint):
+                            cands = char_resolver.resolve_from_text(
+                                f"{role_hint} {user_input}")
+                            via = "手动指定(结合描述)"
+                # (1) 规则层：英文直查 / 中文别名表 / 多候选 —— 无需 LLM
+                if not cands:
+                    cands = char_resolver.resolve_from_text(user_input)
+                    if cands:
+                        via = "本地库直查(无LLM)"
+
+                # (2) LLM 兜底层：仅当规则层没命中时才调用
+                if not cands:
+                    # 先让 LLM 给英文标签（提示词已对小模型简化）
+                    q = ""
+                    try:
+                        q = llm._call(SEARCH_SYSTEM_TINY, user_input, [])
+                    except Exception as e:
+                        log.warning("[llm-extract error] %s", e)
+                    if q:
+                        cands = char_resolver.resolve_from_text(q)
+                        via = "LLM英文标签"
+                    # 若仍未命中：抽取中文角色名，走别名/翻译
+                    if not cands:
+                        cn = ""
+                        try:
+                            cn = llm._call(EXTRACT_CN_SYSTEM,
+                                           user_input, []) or ""
+                        except Exception as e:
+                            log.warning("[llm-cn error] %s", e)
+                        cn = cn.strip()
+                        if cn and cn != "未知":
+                            cands = char_resolver.resolve_from_text(cn)
+                            via = "中文名→别名"
+                        if not cands and cn and cn != "未知":
+                            cands = _translate_and_lookup(cn, llm, history)
+                            via = "LLM翻译"
+                    # 浏览器搜索辅助（可选，给 LLM 提供线索）
+                    if not cands and settings.use_browser_search \
+                            and llm.search_url:
+                        try:
+                            from llm.browser_search import browser_search
+                            web_raw = browser_search(user_input, 5,
+                                                     llm.search_url)
+                            if web_raw:
+                                q2 = llm._call(SEARCH_SYSTEM,
+                                               f"用户需求: {user_input}"
+                                               f"\n网络搜索:\n{web_raw[:800]}",
+                                               history)
+                                cands = char_resolver.resolve_from_text(q2)
+                                via = "浏览器搜索"
+                        except Exception as e:
+                            log.warning("[web search error] %s", e)
+
+                # (3) 组装结果
+                if cands:
+                    raw = _fmt_candidates(cands)
+                    best = cands[0]
+                    search_info = {
+                        "query": best.get("character", ""),
+                        "via": via,
+                        "role_missed": role_missed,
+                        "candidates": [c.get("character", "")
+                                       for c in cands[:5]],
+                        "results": (raw or "")[:800],
+                    }
+                    log.info("[%s] search hit via=%s -> %s",
+                             gid, via, best.get("character"))
+                    # 仅当用户显式给出中文角色（role框/描述直名）时学习别名，
+                    # 避免把 LLM 猜错的结果或整句描述写进别名表。
+                    # 学习统一由 _translate_and_lookup 以精确中文名触发。
+                else:
+                    log.warning("[search] 未找到角色: %s", user_input[:60])
+                    search_info = {"query": "", "via": via,
+                                   "results": "",
+                                   "error": "未找到匹配角色，已按无角色参考继续"}
+            except Exception as e:
+                log.error("[search error] %s", e)
+                search_info = {"query": "", "results": "",
+                               "error": str(e)}
+
+        # ---------- Step 2: LLM 生成提示词 ----------
+        yield {"step": "llm"}
+        prompt = ""
+        try:
+            if search_info and raw:
+                ctx = f"角色参考资料:\n{raw}\n\n用户需求: {user_input}"
+                prompt = llm._call(PROMPT_WITH_CONTEXT_SPECIFIC, ctx, history)
+            else:
+                sp = PROMPT_SYSTEM_SPECIFIC if use_search \
+                    else llm._prompt_system
+                prompt = llm._call(sp, user_input, history)
+            if not prompt:
+                raise RuntimeError("LLM 返回了空提示词")
+            log.info("[%s] llm prompt ok (%d 字符)", gid, len(prompt))
+        except Exception as e:
+            log.error("[%s] llm prompt failed: %s", gid, e, exc_info=True)
+            yield {"step": "error", "error": f"提示词生成失败: {e}"}
+            return
+
+        # ---------- Step 2.5: 分辨率自动决策 ----------
+        if auto_resolution:
+            width, height, size_via = decide_resolution(user_input, llm,
+                                                        history)
+            log.info("[%s] size auto -> %sx%s (via %s)",
+                     gid, width, height, size_via)
+
+        # ---------- Step 3: ComfyUI ----------
+        yield {"step": "comfyui"}
+        log.info("[%s] comfyui submit, size=%sx%s", gid, width, height)
+        try:
+            path = comfy.generate(
+                wf, prompt,
+                placeholder=settings.prompt_placeholder,
+                save_node_id=settings.save_node_id,
+                width=int(width) if width else None,
+                height=int(height) if height else None,
+                width_placeholder=settings.width_placeholder,
+                height_placeholder=settings.height_placeholder,
+            )
+            log.info("[%s] comfyui done -> %s", gid, path.name if path else None)
+        except Exception as e:
+            log.error("[%s] comfyui failed: %s", gid, e, exc_info=True)
+            yield {"step": "error", "error": f"ComfyUI 生图失败: {e}"}
+            return
+
+        if path and path.exists():
+            log.info("[%s] done, 图片已保存", gid)
+            yield {
+                "step": "done",
+                "image": f"/outputs/{path.name}",
+                "prompt": prompt,
+                "search": search_info,
+                "size": {"width": int(width) if width else None,
+                         "height": int(height) if height else None,
+                         "via": size_via},
+                "vlm": vlm_description,
+            }
+        else:
+            log.error("[%s] comfyui 未返回图片路径", gid)
+            yield {"step": "error", "error": "生图失败，ComfyUI 未返回图片"}
+    except Exception as e:
+        log.error("[%s] 生成异常: %s", get_request_id(), e, exc_info=True)
+        yield {"step": "error", "error": str(e)}
+    finally:
+        set_request_id("")
+
+
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+# ====================================================================== #
+# 生成接口：SSE 流（供前端） + 同步 JSON（供外部程序）
 # ====================================================================== #
 @app.route("/api/generate", methods=["POST"])
 def generate():
@@ -488,245 +730,87 @@ def generate():
         return jsonify({"queue": True}), 200
 
     def event_stream():
-        import uuid as _uuid
-        set_request_id(_uuid.uuid4().hex[:12])  # 本次生成全程共享此 id
-        gid = get_request_id()
+        data = request.get_json() or {}
         try:
-            data = request.get_json() or {}
-            user_input = (data.get("prompt") or "").strip()
-            log.info("[%s] input: %s", gid, user_input[:100])
-            if not user_input:
-                yield _sse({"step": "error", "error": "请输入图片描述"})
-                return
-
-            # ---------- 解析参数 ----------
-            wf_path = data.get("workflow_path") or settings.workflow_path
-            use_search = bool(data.get("use_search", True))
-            history = data.get("history") or []
-            search_url_idx = int(data.get("search_url_idx") or 0)
-            auto_resolution = bool(data.get("auto_resolution", False))
-            width = data.get("width") or settings.gen_width
-            height = data.get("height") or settings.gen_height
-            size_via = "manual"
-            log.info("[%s] params: wf=%s search=%s auto_size=%s size=%sx%s",
-                     gid, Path(wf_path).name, use_search, auto_resolution,
-                     width, height)
-
-            # ---------- 加载工作流 ----------
-            try:
-                wf = load_workflow(wf_path)
-                log.info("[%s] workflow loaded: %s 节点数=%s", gid,
-                         Path(wf_path).name, len(wf))
-            except FileNotFoundError as e:
-                log.error("[%s] workflow not found: %s", gid, e)
-                yield _sse({"step": "error", "error": str(e)})
-                return
-            except Exception as e:
-                log.error("[%s] workflow parse error: %s", gid, e,
-                          exc_info=True)
-                yield _sse({"step": "error", "error": f"工作流解析失败: {e}"})
-                return
-
-            llm = make_llm(search_url_idx=search_url_idx)
-            comfy = make_comfy()
-
-            # ---------- Step 0: VLM ----------
-            image_list = data.get("image") or []
-            if isinstance(image_list, str):
-                image_list = [image_list] if image_list else []
-            vlm_description = None
-            if image_list:
-                yield _sse({"step": "vlm"})
-                log.info("[%s] vlm: %d 张图", gid, len(image_list))
-                try:
-                    vlm_description = vlm_analyze(image_list)
-                    log.info("[%s] vlm done: %s 字", gid,
-                             len(vlm_description or ""))
-                except RuntimeError as e:
-                    log.error("[%s] vlm failed: %s", gid, e)
-                    yield _sse({"step": "error",
-                                "error": f"图片识别失败: {e}"})
-                    return
-                user_input = (f"用户上传了一张图片，以下是图片识别结果：\n"
-                              f"{vlm_description}\n\n用户需求：{user_input}")
-
-            # ---------- Step 1: 角色识别（规则优先，LLM 兜底） ----------
-            search_info = None
-            raw = None
-            role_hint = (data.get("role") or "").strip()
-            if use_search:
-                yield _sse({"step": "search"})
-                cands: list = []
-                via = ""
-                role_missed = False
-                try:
-                    # (0) 手动指定角色（最高优先级，完全绕过识别）
-                    if role_hint:
-                        cands = char_resolver.resolve_from_text(role_hint,
-                                                                strict=True)
-                        if cands:
-                            via = "手动指定"
-                            # 用户明确给的中文称呼 -> 记住别名
-                            char_resolver.learn(role_hint, cands[0], via)
-                        else:
-                            role_missed = True
-                            # 若输入是自由文本（非纯标签样式），允许结合描述再查一次
-                            if not _looks_like_tag(role_hint):
-                                cands = char_resolver.resolve_from_text(
-                                    f"{role_hint} {user_input}")
-                                via = "手动指定(结合描述)"
-                    # (1) 规则层：英文直查 / 中文别名表 / 多候选 —— 无需 LLM
-                    if not cands:
-                        cands = char_resolver.resolve_from_text(user_input)
-                        if cands:
-                            via = "本地库直查(无LLM)"
-
-                    # (2) LLM 兜底层：仅当规则层没命中时才调用
-                    if not cands:
-                        # 先让 LLM 给英文标签（提示词已对小模型简化）
-                        q = ""
-                        try:
-                            q = llm._call(SEARCH_SYSTEM_TINY, user_input, [])
-                        except Exception as e:
-                            log.warning("[llm-extract error] %s", e)
-                        if q:
-                            cands = char_resolver.resolve_from_text(q)
-                            via = "LLM英文标签"
-                        # 若仍未命中：抽取中文角色名，走别名/翻译
-                        if not cands:
-                            cn = ""
-                            try:
-                                cn = llm._call(EXTRACT_CN_SYSTEM,
-                                               user_input, []) or ""
-                            except Exception as e:
-                                log.warning("[llm-cn error] %s", e)
-                            cn = cn.strip()
-                            if cn and cn != "未知":
-                                cands = char_resolver.resolve_from_text(cn)
-                                via = "中文名→别名"
-                            if not cands and cn and cn != "未知":
-                                cands = _translate_and_lookup(cn, llm, history)
-                                via = "LLM翻译"
-                        # 浏览器搜索辅助（可选，给 LLM 提供线索）
-                        if not cands and settings.use_browser_search \
-                                and llm.search_url:
-                            try:
-                                from llm.browser_search import browser_search
-                                web_raw = browser_search(user_input, 5,
-                                                         llm.search_url)
-                                if web_raw:
-                                    q2 = llm._call(SEARCH_SYSTEM,
-                                                   f"用户需求: {user_input}"
-                                                   f"\n网络搜索:\n{web_raw[:800]}",
-                                                   history)
-                                    cands = char_resolver.resolve_from_text(q2)
-                                    via = "浏览器搜索"
-                            except Exception as e:
-                                log.warning("[web search error] %s", e)
-
-                    # (3) 组装结果
-                    if cands:
-                        raw = _fmt_candidates(cands)
-                        best = cands[0]
-                        search_info = {
-                            "query": best.get("character", ""),
-                            "via": via,
-                            "role_missed": role_missed,
-                            "candidates": [c.get("character", "")
-                                           for c in cands[:5]],
-                            "results": (raw or "")[:800],
-                        }
-                        log.info("[%s] search hit via=%s -> %s",
-                                 gid, via, best.get("character"))
-                        # 仅当用户显式给出中文角色（role框/描述直名）时学习别名，
-                        # 避免把 LLM 猜错的结果或整句描述写进别名表。
-                        # 学习统一由 _translate_and_lookup 以精确中文名触发。
-                    else:
-                        log.warning("[search] 未找到角色: %s", user_input[:60])
-                        search_info = {"query": "", "via": via,
-                                       "results": "",
-                                       "error": "未找到匹配角色，已按无角色参考继续"}
-                except Exception as e:
-                    log.error("[search error] %s", e)
-                    search_info = {"query": "", "results": "",
-                                   "error": str(e)}
-
-            # ---------- Step 2: LLM 生成提示词 ----------
-            yield _sse({"step": "llm"})
-            prompt = ""
-            try:
-                if search_info and raw:
-                    ctx = f"角色参考资料:\n{raw}\n\n用户需求: {user_input}"
-                    prompt = llm._call(PROMPT_WITH_CONTEXT_SPECIFIC, ctx, history)
-                else:
-                    sp = PROMPT_SYSTEM_SPECIFIC if use_search \
-                        else llm._prompt_system
-                    prompt = llm._call(sp, user_input, history)
-                if not prompt:
-                    raise RuntimeError("LLM 返回了空提示词")
-                log.info("[%s] llm prompt ok (%d 字符)", gid, len(prompt))
-            except Exception as e:
-                log.error("[%s] llm prompt failed: %s", gid, e, exc_info=True)
-                yield _sse({"step": "error",
-                            "error": f"提示词生成失败: {e}"})
-                return
-
-            # ---------- Step 2.5: 分辨率自动决策 ----------
-            if auto_resolution:
-                width, height, size_via = decide_resolution(user_input, llm,
-                                                            history)
-                log.info("[%s] size auto -> %sx%s (via %s)",
-                         gid, width, height, size_via)
-
-            # ---------- Step 3: ComfyUI ----------
-            yield _sse({"step": "comfyui"})
-            log.info("[%s] comfyui submit, size=%sx%s", gid, width, height)
-            try:
-                path = comfy.generate(
-                    wf, prompt,
-                    placeholder=settings.prompt_placeholder,
-                    save_node_id=settings.save_node_id,
-                    width=int(width) if width else None,
-                    height=int(height) if height else None,
-                    width_placeholder=settings.width_placeholder,
-                    height_placeholder=settings.height_placeholder,
-                )
-                log.info("[%s] comfyui done -> %s", gid, path.name if path else None)
-            except Exception as e:
-                log.error("[%s] comfyui failed: %s", gid, e, exc_info=True)
-                yield _sse({"step": "error",
-                            "error": f"ComfyUI 生图失败: {e}"})
-                return
-
-            if path and path.exists():
-                log.info("[%s] done, 图片已保存", gid)
-                yield _sse({
-                    "step": "done",
-                    "image": f"/outputs/{path.name}",
-                    "prompt": prompt,
-                    "search": search_info,
-                    "size": {"width": int(width) if width else None,
-                             "height": int(height) if height else None,
-                             "via": size_via},
-                    "vlm": vlm_description,
-                })
-            else:
-                log.error("[%s] comfyui 未返回图片路径", gid)
-                yield _sse({"step": "error",
-                            "error": "生图失败，ComfyUI 未返回图片"})
-        except Exception as e:
-            log.error("[%s] 生成异常: %s", get_request_id(), e, exc_info=True)
-            yield _sse({"step": "error", "error": str(e)})
+            for ev in _run_generation(data):
+                yield _sse(ev)
         finally:
-            set_request_id("")
             _gen_lock.release()
 
     return Response(stream_with_context(event_stream()),
                     mimetype="text/event-stream")
 
 
-def _sse(payload: dict) -> str:
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+@app.route("/api/generate/sync", methods=["POST"])
+def generate_sync():
+    """同步生图接口：外部程序一次 POST，等待出图后直接返回 JSON。
+
+    请求体与 /api/generate 相同：
+        {
+          "prompt": "...",            # 必填
+          "role": "shiroko",          # 可选，手动指定角色
+          "use_search": true,         # 可选，默认 true
+          "auto_resolution": true,    # 可选，AI 决定尺寸
+          "width": 896, "height": 1152,
+          "workflow_path": "...",
+          "image": ["data:..."]       # 可选，参考图 base64
+        }
+    响应 200: {"success": true, "image": "/outputs/x.png",
+               "url": "http://host/outputs/x.png", "prompt": "...", "size": {...}}
+    响应 429: {"success": false, "error": "...", "queue": true}  # 已有任务在跑
+    响应 500: {"success": false, "error": "..."}                 # 生成失败
+    """
+    if not _gen_lock.acquire(blocking=False):
+        return jsonify({"success": False, "queue": True,
+                        "error": "已有生图任务进行中，请稍后重试"}), 429
+    data = request.get_json() or {}
+    result = None
+    try:
+        for ev in _run_generation(data):
+            if ev.get("step") == "done":
+                result = ev
+            elif ev.get("step") == "error":
+                return jsonify({"success": False, "error": ev.get("error")}), 500
+    finally:
+        _gen_lock.release()
+
+    if not result or not result.get("image"):
+        return jsonify({"success": False, "error": "生图失败，未返回图片"}), 500
+    image_url = result["image"]
+    return jsonify({
+        "success": True,
+        "image": image_url,
+        "url": request.host_url.rstrip("/") + image_url,
+        "prompt": result.get("prompt", ""),
+        "search": result.get("search"),
+        "size": result.get("size"),
+        "vlm": result.get("vlm"),
+    })
+
+
+@app.route("/api/health", methods=["GET"])
+def api_health():
+    """健康检查：确认服务与 ComfyUI 可达状态。"""
+    import requests as _rq
+    comfy_ok = False
+    comfy_err = ""
+    try:
+        r = _rq.get(f"{settings.comfyui_url}/system_stats", timeout=5)
+        comfy_ok = r.ok
+        if not r.ok:
+            comfy_err = f"HTTP {r.status_code}"
+    except Exception as e:
+        comfy_err = str(e)[:120]
+    return jsonify({
+        "success": True,
+        "status": "ok",
+        "comfyui": {"url": settings.comfyui_url,
+                    "reachable": comfy_ok,
+                    "error": comfy_err or None},
+        "llm": {"base_url": settings.llm_base_url,
+                "model": settings.llm_model},
+        "busy": _gen_lock.locked(),
+    })
 
 
 # ====================================================================== #
@@ -792,13 +876,33 @@ def api_logs_frontend():
 if __name__ == "__main__":
     import os as _os
     import waitress
+    from waitress.server import create_server
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     host = _os.getenv("HOST", "0.0.0.0")
     port = int(_os.getenv("PORT", "5000"))
+    # 额外监听端口（逗号分隔），例如 EXTRA_PORTS=5001,5002
+    extra_ports = []
+    for p in str(_os.getenv("EXTRA_PORTS", "")).split(","):
+        p = p.strip()
+        if p.isdigit():
+            extra_ports.append(int(p))
+
     log.info("喵梓二号 启动，日志文件: %s", "logs/app.log")
     print("=" * 46)
     print("  喵梓二号 已启动")
-    print(f"  本机访问:  http://127.0.0.1:{port}")
+    print(f"  主端口:    http://127.0.0.1:{port}")
+    for ep in extra_ports:
+        print(f"  附加端口:  http://127.0.0.1:{ep}")
     print(f"  局域网:    http://<your-ip>:{port}")
+    print("  健康检查:  /api/health")
+    print("  同步生图:  POST /api/generate/sync")
     print("=" * 46)
-    waitress.serve(app, host=host, port=port, threads=8)
+
+    # 多端口：waitress 每个端口一个 serve 线程
+    servers = [create_server(app, host=host, port=port, threads=8)]
+    for ep in extra_ports:
+        servers.append(create_server(app, host=host, port=ep, threads=8))
+    import threading as _th
+    for srv in servers[1:]:
+        _th.Thread(target=srv.run, daemon=True).start()
+    servers[0].run()
