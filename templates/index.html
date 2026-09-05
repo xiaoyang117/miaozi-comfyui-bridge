@@ -366,6 +366,7 @@ function populateResDropdown() {
     opt.dataset.w = p.width; opt.dataset.h = p.height;
     sel.appendChild(opt);
   });
+  restoreResSelection();  // 重建后恢复上次选择
 }
 function currentResolution() {
   const sel = document.getElementById('chat_resolution');
