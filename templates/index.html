@@ -59,7 +59,7 @@
         <span class="step-chip" data-step="3"><i></i>尺寸</span>
         <span class="step-chip" data-step="4"><i></i>出图</span>
       </div>
-      <div class="step-msg"><span id="stepDot" class="step-dot"></span><span id="stepText">准备中...</span></div>
+      <div class="step-msg"><span id="stepDot" class="step-dot"></span><span id="stepText">📤 等待服务器响应…</span></div>
     </div>
 
     <div class="chat-input-bar">
@@ -754,6 +754,8 @@ async function sendMessage() {
 
     // 读取 SSE：逐步推进状态面板
     resetSteps();
+    _progSet('🚀 已连接，开始执行…');
+    document.getElementById('stepText').textContent = '🚀 已连接，开始执行…';
     const reader = response.body.getReader(); const decoder = new TextDecoder();
     let buffer='', result=null, failed=null;
     while (true) {
@@ -825,7 +827,7 @@ function _beginProgress() {
   el.appendChild(dot); el.appendChild(tx);
   box.appendChild(el);
   _progEl = el; _progTextEl = tx; _progT0 = Date.now();
-  _progSet('准备中…');
+  _progSet('📤 正在提交生成请求…');
   box.scrollTop = box.scrollHeight;
   _progTimer = setInterval(() => { if (_progTextEl) _progSet(_progTextEl.dataset.base); }, 1000);
 }
