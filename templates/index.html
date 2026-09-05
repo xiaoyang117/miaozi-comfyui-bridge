@@ -703,6 +703,7 @@ async function sendMessage() {
   userImageCache[chatLog.length-1] = imageData;
   addChatBubble('user', text, null, null, chatLog.length-1);
   removeImage();
+  _beginProgress();  // 对话内临时进度气泡（不留存）
 
   try {
     const useSearch = document.getElementById('useSearch').checked;
@@ -765,6 +766,7 @@ async function sendMessage() {
         const st = evt.step;
         if (st==='vlm'||st==='search'||st==='llm'||st==='size'||st==='comfyui') {
           setStep(st, evt.msg || '');
+          _progSet(evt.msg || _STEP_DEF_TEXT[st] || st);
         } else if (st==='done') { result = evt; finishSteps(true, '✅ 生成完成'); }
         else if (st==='error') { failed = evt; finishSteps(false, '❌ ' + (evt.error||'失败')); throw new Error(evt.error); }
       }
@@ -775,21 +777,72 @@ async function sendMessage() {
       saveChatLog();
       const cacheBust = result.image + '?cb=' + Date.now()+'_'+Math.random().toString(36).slice(2,6);
       addChatBubble('assistant', result.prompt, cacheBust, result.search, chatLog.length-1, result.vlm, result.size);
+      const parts = [];
+      if (result.size && result.size.width) parts.push(result.size.width+'×'+result.size.height);
+      if (result.search && result.search.query) parts.push(result.search.query);
+      if (parts.length) _endProgress(true, parts.join(' · '));
+      else _endProgress(true, '生成完成');
     } else { throw new Error(failed ? failed.error : '未收到完成事件'); }
   } catch(e) {
     rollbackLast();
     const errMsg = e.message || '生成失败';
+    _endProgress(false, errMsg.slice(0, 90));
     finishSteps(false, '❌ ' + errMsg);
     addChatBubble('assistant', '⚠️ 错误: ' + errMsg);
     showModal('ERROR: ' + errMsg);
   } finally {
     isGenerating = false;
     sendBtn.disabled = false; sendBtn.textContent = '生成';
+    _removeProgress();  // 兜底：确保无残留进度气泡
   }
 }
 function showQueueState(attempt) {
   // 排队提示：显示在消息面板顶部
   setStep('comfyui', `⏳ 已有任务在生成，排队中…（第 ${attempt} 次重试）`);
+  _progSet(`⏳ 排队中…（第 ${attempt} 次重试）`);
+}
+
+// ============ 对话内临时进度气泡（不留存） ============
+// 生成期间在消息流里显示实时进度，结束后显示摘要并自动移除，
+// 不写入 chatLog / localStorage（刷新即消失）。
+const _STEP_DEF_TEXT = {
+  vlm: '🔎 识别参考图片…', search: '🔎 角色识别…',
+  llm: '🧠 生成提示词…', size: '📐 确定尺寸…', comfyui: '⚙️ 提交出图…',
+};
+let _progEl = null, _progTextEl = null, _progTimer = null, _progT0 = 0;
+function _progSet(msg) {
+  if (!_progTextEl) return;
+  _progTextEl.dataset.base = msg || '';
+  const sec = Math.round((Date.now() - _progT0) / 1000);
+  _progTextEl.textContent = (msg || '') + (sec > 0 ? `  ·  ⏱${sec}s` : '');
+}
+function _beginProgress() {
+  _removeProgress();
+  const box = document.getElementById('chatMessages'); if (!box) return;
+  const el = document.createElement('div'); el.className = 'chat-prog';
+  const dot = document.createElement('span'); dot.className = 'chat-prog-dot';
+  const tx = document.createElement('span'); tx.className = 'chat-prog-text';
+  el.appendChild(dot); el.appendChild(tx);
+  box.appendChild(el);
+  _progEl = el; _progTextEl = tx; _progT0 = Date.now();
+  _progSet('准备中…');
+  box.scrollTop = box.scrollHeight;
+  _progTimer = setInterval(() => { if (_progTextEl) _progSet(_progTextEl.dataset.base); }, 1000);
+}
+function _endProgress(ok, summary) {
+  if (_progTimer) { clearInterval(_progTimer); _progTimer = null; }
+  const el = _progEl; const tx = _progTextEl;
+  if (!el) { _progTextEl = null; return; }
+  const sec = Math.round((Date.now() - _progT0) / 1000);
+  tx.textContent = (ok ? '✅ ' : '❌ ') + (summary || '完成') + (sec > 0 ? `（${sec}s）` : '');
+  el.classList.add(ok ? 'prog-ok' : 'prog-err');
+  _progEl = null; _progTextEl = null;
+  setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, ok ? 1600 : 3500);
+}
+function _removeProgress() {
+  if (_progTimer) { clearInterval(_progTimer); _progTimer = null; }
+  if (_progEl && _progEl.parentNode) _progEl.parentNode.removeChild(_progEl);
+  _progEl = null; _progTextEl = null;
 }
 function rollbackLast() {
   chatLog.pop(); chatHistory.pop(); saveChatLog();

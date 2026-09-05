@@ -194,6 +194,30 @@ body {
 .chat-bubble:hover .btn-del-msg { opacity: 1; }
 .btn-del-msg:hover { color: var(--red); background: var(--red-soft); }
 
+/* 对话内临时进度气泡（仅生成期间显示，不留存聊天记录） */
+.chat-prog {
+  display: flex; align-items: center; gap: 8px;
+  margin: 2px 4px 8px; padding: 6px 12px; max-width: 88%;
+  border: 1px dashed rgba(99,102,241,.45); border-radius: 10px;
+  background: var(--accent-soft);
+  font-size: .78rem; color: var(--text-dim);
+}
+.chat-prog-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent); animation: pulse 1s ease-in-out infinite;
+  flex-shrink: 0;
+}
+.chat-prog.prog-ok {
+  border-style: solid; border-color: rgba(34,197,94,.35);
+  background: var(--green-soft); color: #86efac;
+}
+.chat-prog.prog-ok .chat-prog-dot { background: var(--green); animation: none; }
+.chat-prog.prog-err {
+  border-style: solid; border-color: rgba(239,68,68,.45);
+  background: rgba(239,68,68,.08); color: #fca5a5;
+}
+.chat-prog.prog-err .chat-prog-dot { background: #ef4444; animation: none; }
+
 .chat-has-image {
   font-size: .74rem; color: var(--amber); margin-bottom: 5px;
   font-weight: 600;
