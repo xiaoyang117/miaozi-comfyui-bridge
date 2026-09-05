@@ -381,6 +381,48 @@ function currentResolution() {
            height: parseInt(document.getElementById('s_gen_height').value)||0 };
 }
 
+// ================= 选择持久化（工作流/分辨率，localStorage） =================
+const LS_WF = 'mz_chat_workflow';
+const LS_RES = 'mz_chat_resolution';
+function _lsGet(k) { try { return localStorage.getItem(k); } catch(e) { return null; } }
+function _lsSet(k, v) { try { localStorage.setItem(k, v); } catch(e) { /* 忽略 */ } }
+// 记住当前工作流选择（下拉值=workflow 路径）
+function saveWfSelection() {
+  const v = document.getElementById('chat_workflow').value;
+  if (v) _lsSet(LS_WF, v); else { try { localStorage.removeItem(LS_WF); } catch(e){} }
+}
+// 记住当前分辨率选择（auto 或 "宽x高"，不记索引以免预设顺序变动后错位）
+function saveResSelection() {
+  const sel = document.getElementById('chat_resolution');
+  const opt = sel.selectedOptions[0];
+  if (!opt || !opt.dataset) return;
+  let key = '';
+  if (opt.dataset.auto) key = 'auto';
+  else if (opt.dataset.w) key = opt.dataset.w + 'x' + opt.dataset.h;
+  if (key) _lsSet(LS_RES, key); else { try { localStorage.removeItem(LS_RES); } catch(e){} }
+}
+// 下拉重建后恢复上次选择（找不到匹配项则回落到首项）
+function restoreWfSelection() {
+  const sel = document.getElementById('chat_workflow');
+  if (!sel || !sel.options.length) return;
+  const saved = _lsGet(LS_WF);
+  if (saved) {
+    for (const o of sel.options) { if (o.value === saved) { sel.value = saved; return; } }
+  }
+  sel.selectedIndex = 0;
+}
+function restoreResSelection() {
+  const sel = document.getElementById('chat_resolution');
+  if (!sel || !sel.options.length) return;
+  const saved = _lsGet(LS_RES);
+  if (!saved) return;  // 无记录 → 保持默认（首项=自动）
+  if (saved === 'auto') { sel.value = 'auto'; return; }
+  for (const o of sel.options) {
+    if (o.dataset && o.dataset.w && (o.dataset.w + 'x' + o.dataset.h) === saved) { sel.value = o.value; return; }
+  }
+  sel.selectedIndex = 0;  // 该预设已被删除 → 回落首项
+}
+
 // ================= 尺寸管理弹窗 =================
 let resManagerDraft = [];
 function openResManager() {
@@ -680,6 +722,7 @@ async function loadWorkflowList() {
       d.workflows.forEach((wf,i)=>{ const o=document.createElement('option'); o.value=wf.path; o.textContent=wf.name; sel.appendChild(o); });
     } else { sel.innerHTML='<option value="">无工作流文件</option>'; }
   } catch { sel.innerHTML='<option value="">加载失败</option>'; }
+  restoreWfSelection();  // 重建后恢复上次选择
 }
 
 // ================= 发送 =================
@@ -1111,6 +1154,8 @@ window.addEventListener('unhandledrejection', function(e) {
 });
 
 // ================= 初始化 =================
+document.getElementById('chat_workflow').addEventListener('change', saveWfSelection);
+document.getElementById('chat_resolution').addEventListener('change', saveResSelection);
 loadSettings();
 loadWorkflowList();
 restoreChatLog();
