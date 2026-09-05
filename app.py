@@ -540,12 +540,14 @@ def _run_generation(data: dict):
             image_list = [image_list] if image_list else []
         vlm_description = None
         if image_list:
-            yield {"step": "vlm"}
+            yield {"step": "vlm", "msg": f"🖼️ 识别 {len(image_list)} 张参考图…"}
             log.info("[%s] vlm: %d 张图", gid, len(image_list))
             try:
                 vlm_description = vlm_analyze(image_list)
                 log.info("[%s] vlm done: %s 字", gid,
                          len(vlm_description or ""))
+                yield {"step": "vlm",
+                       "msg": f"✓ 图片识别完成（{len(vlm_description or '')} 字）"}
             except RuntimeError as e:
                 log.error("[%s] vlm failed: %s", gid, e)
                 yield {"step": "error", "error": f"图片识别失败: {e}"}
@@ -558,7 +560,7 @@ def _run_generation(data: dict):
         raw = None
         role_hint = (data.get("role") or "").strip()
         if use_search:
-            yield {"step": "search"}
+            yield {"step": "search", "msg": "🔎 正在识别角色…"}
             cands: list = []
             via = ""
             role_missed = False
@@ -641,6 +643,8 @@ def _run_generation(data: dict):
                     }
                     log.info("[%s] search hit via=%s -> %s",
                              gid, via, best.get("character"))
+                    yield {"step": "search",
+                           "msg": f"✓ 角色识别：{best.get('character')} ({via})"}
                     # 仅当用户显式给出中文角色（role框/描述直名）时学习别名，
                     # 避免把 LLM 猜错的结果或整句描述写进别名表。
                     # 学习统一由 _translate_and_lookup 以精确中文名触发。
@@ -649,13 +653,14 @@ def _run_generation(data: dict):
                     search_info = {"query": "", "via": via,
                                    "results": "",
                                    "error": "未找到匹配角色，已按无角色参考继续"}
+                    yield {"step": "search",
+                           "msg": "⚠️ 未匹配到角色，按无角色参考继续"}
             except Exception as e:
                 log.error("[search error] %s", e)
                 search_info = {"query": "", "results": "",
                                "error": str(e)}
 
         # ---------- Step 2: LLM 生成提示词（直通模式则跳过） ----------
-        yield {"step": "llm"}
         prompt = ""
         if raw_prompt:
             # 直通：外部已给标准标签，原样作为正向提示词
@@ -663,6 +668,7 @@ def _run_generation(data: dict):
             log.info("[%s] raw prompt passthrough (%d 字符)", gid,
                      len(prompt))
         else:
+            yield {"step": "llm", "msg": "🧠 LLM 生成提示词…"}
             try:
                 if search_info and raw:
                     ctx = f"角色参考资料:\n{raw}\n\n用户需求: {user_input}"
@@ -675,6 +681,7 @@ def _run_generation(data: dict):
                 if not prompt:
                     raise RuntimeError("LLM 返回了空提示词")
                 log.info("[%s] llm prompt ok (%d 字符)", gid, len(prompt))
+                yield {"step": "llm", "msg": "✓ 提示词已生成"}
             except Exception as e:
                 log.error("[%s] llm prompt failed: %s", gid, e,
                           exc_info=True)
@@ -696,23 +703,61 @@ def _run_generation(data: dict):
                 log.info("[%s] size auto -> %sx%s (via %s)",
                          gid, width, height, size_via)
 
-        # ---------- Step 3: ComfyUI ----------
-        yield {"step": "comfyui"}
+        # ---------- Step 3: ComfyUI（工作线程 + 进度转发） ----------
+        if auto_resolution:
+            yield {"step": "size", "msg": f"📐 尺寸：{width}×{height} ({size_via})"}
+        else:
+            yield {"step": "size", "msg": f"📐 尺寸：{width}×{height}"}
+        yield {"step": "comfyui", "msg": "⚙️ 正在提交 ComfyUI…"}
         log.info("[%s] comfyui submit, size=%sx%s", gid, width, height)
-        try:
-            path = comfy.generate(
-                wf, prompt,
-                placeholder=settings.prompt_placeholder,
-                save_node_id=settings.save_node_id,
-                width=int(width) if width else None,
-                height=int(height) if height else None,
-                width_placeholder=settings.width_placeholder,
-                height_placeholder=settings.height_placeholder,
-            )
-            log.info("[%s] comfyui done -> %s", gid, path.name if path else None)
-        except Exception as e:
-            log.error("[%s] comfyui failed: %s", gid, e, exc_info=True)
-            yield {"step": "error", "error": f"ComfyUI 生图失败: {e}"}
+        import queue as _queue
+        import threading as _th
+        import time as _time
+        _cq = _queue.Queue()
+        _t0 = _time.time()
+
+        def _run_comfy():
+            try:
+                p = comfy.generate(
+                    wf, prompt,
+                    placeholder=settings.prompt_placeholder,
+                    save_node_id=settings.save_node_id,
+                    width=int(width) if width else None,
+                    height=int(height) if height else None,
+                    width_placeholder=settings.width_placeholder,
+                    height_placeholder=settings.height_placeholder,
+                    progress_cb=lambda msg: _cq.put(("progress", msg)),
+                )
+                _cq.put(("ok", p))
+            except Exception as e:
+                log.error("[%s] comfyui failed: %s", gid, e, exc_info=True)
+                _cq.put(("err", e))
+
+        _th.Thread(target=_run_comfy, daemon=True).start()
+        path = None
+        comfy_err = None
+        while True:
+            try:
+                kind, payload = _cq.get(timeout=5)
+            except _queue.Empty:
+                # 心跳：ComfyUI 仍未返回，周期汇报防止连接空闲
+                yield {"step": "comfyui",
+                       "msg": f"⏳ 等待 ComfyUI… {int(_time.time()-_t0)}s"}
+                continue
+            if kind == "progress":
+                yield {"step": "comfyui", "msg": f"🎨 {payload}"}
+            elif kind == "ok":
+                path = payload
+                log.info("[%s] comfyui done -> %s",
+                         gid, path.name if path else None)
+                break
+            else:  # err
+                comfy_err = payload
+                break
+
+        if comfy_err:
+            yield {"step": "error",
+                   "error": f"ComfyUI 生图失败: {comfy_err}"}
             return
 
         if path and path.exists():

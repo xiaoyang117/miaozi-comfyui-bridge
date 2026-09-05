@@ -53,9 +53,16 @@
 
     <div id="chatMessages" class="chat-messages"></div>
 
+    <!-- 进度面板：步骤清单 + 实时详情 -->
     <div id="stepIndicator" class="step-indicator hidden">
-      <span class="step-dot"></span>
-      <span id="stepText">准备中...</span>
+      <div class="step-track">
+        <span class="step-chip" data-step="0"><i></i>识别</span>
+        <span class="step-chip" data-step="1"><i></i>角色</span>
+        <span class="step-chip" data-step="2"><i></i>提示词</span>
+        <span class="step-chip" data-step="3"><i></i>尺寸</span>
+        <span class="step-chip" data-step="4"><i></i>出图</span>
+      </div>
+      <div class="step-msg"><span id="stepDot" class="step-dot"></span><span id="stepText">准备中...</span></div>
     </div>
 
     <div class="chat-input-bar">
@@ -491,15 +498,58 @@ function clearChatLog() {
 }
 
 // ================= 步骤指示 =================
-function setStep(step) {
-  const el = document.getElementById('stepIndicator');
-  el.classList.remove('step-done');
-  const text = document.getElementById('stepText');
-  const steps = ['🖼️ 图片识别中...','🔎 搜索角色特征...','🧠 LLM 生成提示词...','⚙️ 提交 ComfyUI 生成中...'];
-  text.textContent = steps[step] || ('进行中 ' + (step||''));
-  el.classList.remove('hidden');
+// SSE step 名 -> chip 序号
+const STEP_MAP = { vlm: 0, search: 1, llm: 2, size: 3, comfyui: 4 };
+let currentChip = -1;
+
+function resetSteps() {
+  currentChip = -1;
+  document.querySelectorAll('#stepIndicator .step-chip').forEach(ch => {
+    ch.classList.remove('active', 'done');
+  });
 }
-function hideStep() { document.getElementById('stepIndicator').classList.add('hidden'); }
+function setStep(step, msg) {
+  const el = document.getElementById('stepIndicator');
+  el.classList.remove('step-done', 'step-error');
+  el.classList.remove('hidden');
+  const chipIdx = (step !== undefined && STEP_MAP[step] !== undefined)
+    ? STEP_MAP[step] : -1;
+  if (chipIdx >= 0 && chipIdx > currentChip) {
+    // 已完成之前步骤
+    for (let i = 0; i < chipIdx; i++) {
+      const ch = document.querySelector(`#stepIndicator .step-chip[data-step="${i}"]`);
+      if (ch) { ch.classList.remove('active'); ch.classList.add('done'); }
+    }
+    currentChip = chipIdx;
+  }
+  if (chipIdx >= 0) {
+    const ch = document.querySelector(`#stepIndicator .step-chip[data-step="${chipIdx}"]`);
+    if (ch) ch.classList.add('active');
+  }
+  const text = document.getElementById('stepText');
+  if (msg) text.textContent = msg;
+  else if (chipIdx >= 0) text.textContent = text.textContent || ('处理中…');
+}
+function finishSteps(ok, msg) {
+  const el = document.getElementById('stepIndicator');
+  el.classList.remove('hidden');
+  if (ok) {
+    // 全部 chip 打勾
+    document.querySelectorAll('#stepIndicator .step-chip').forEach(ch => {
+      ch.classList.remove('active'); ch.classList.add('done');
+    });
+    el.classList.add('step-done');
+    document.getElementById('stepText').textContent = msg || '✅ 生成完成';
+  } else {
+    el.classList.add('step-error');
+    document.getElementById('stepText').textContent = msg || '❌ 生成失败';
+  }
+  setTimeout(() => { el.classList.add('hidden'); resetSteps(); }, 3500);
+}
+function hideStep() {
+  document.getElementById('stepIndicator').classList.add('hidden');
+  resetSteps();
+}
 
 // ================= 气泡渲染 =================
 function addChatBubble(role, text, imageUrl, searchInfo, index, vlmText, sizeInfo) {
@@ -691,8 +741,7 @@ async function sendMessage() {
       if (ct.includes('text/event-stream')) { hideStep(); break; }
       const d = await response.json();
       if (d.queue) {
-        document.getElementById('stepText').textContent = `排队中… (第${attempt}次)`;
-        document.getElementById('stepIndicator').classList.remove('hidden');
+        showQueueState(attempt);
         await new Promise(r=>setTimeout(r,2000)); continue;
       }
       break;
@@ -708,10 +757,10 @@ async function sendMessage() {
       throw new Error(d.error || '请求失败');
     }
 
-    // 读取 SSE
-    hideStep();
+    // 读取 SSE：逐步推进状态面板
+    resetSteps();
     const reader = response.body.getReader(); const decoder = new TextDecoder();
-    let buffer='', result=null;
+    let buffer='', result=null, failed=null;
     while (true) {
       const {done,value} = await reader.read(); if (done) break;
       buffer += decoder.decode(value,{stream:true});
@@ -719,12 +768,11 @@ async function sendMessage() {
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
         const evt = JSON.parse(line.slice(6));
-        if (evt.step==='vlm') setStep(0);
-        else if (evt.step==='search') setStep(1);
-        else if (evt.step==='llm') setStep(2);
-        else if (evt.step==='comfyui') setStep(3);
-        else if (evt.step==='done') result = evt;
-        else if (evt.step==='error') throw new Error(evt.error);
+        const st = evt.step;
+        if (st==='vlm'||st==='search'||st==='llm'||st==='size'||st==='comfyui') {
+          setStep(st, evt.msg || '');
+        } else if (st==='done') { result = evt; finishSteps(true, '✅ 生成完成'); }
+        else if (st==='error') { failed = evt; finishSteps(false, '❌ ' + (evt.error||'失败')); throw new Error(evt.error); }
       }
     }
     if (result) {
@@ -733,22 +781,21 @@ async function sendMessage() {
       saveChatLog();
       const cacheBust = result.image + '?cb=' + Date.now()+'_'+Math.random().toString(36).slice(2,6);
       addChatBubble('assistant', result.prompt, cacheBust, result.search, chatLog.length-1, result.vlm, result.size);
-      const st = document.getElementById('stepIndicator');
-      document.getElementById('stepText').textContent = '✅ 生成完成'; st.classList.add('step-done');
-      setTimeout(hideStep, 1200);
-    } else { throw new Error('未收到完成事件'); }
+    } else { throw new Error(failed ? failed.error : '未收到完成事件'); }
   } catch(e) {
     rollbackLast();
     const errMsg = e.message || '生成失败';
-    const st = document.getElementById('stepIndicator');
-    document.getElementById('stepText').textContent = '❌ ' + errMsg; st.classList.add('step-done');
-    setTimeout(hideStep, 2000);
+    finishSteps(false, '❌ ' + errMsg);
     addChatBubble('assistant', '⚠️ 错误: ' + errMsg);
     showModal('ERROR: ' + errMsg);
   } finally {
     isGenerating = false;
     sendBtn.disabled = false; sendBtn.textContent = '生成';
   }
+}
+function showQueueState(attempt) {
+  // 排队提示：显示在消息面板顶部
+  setStep('comfyui', `⏳ 已有任务在生成，排队中…（第 ${attempt} 次重试）`);
 }
 function rollbackLast() {
   chatLog.pop(); chatHistory.pop(); saveChatLog();

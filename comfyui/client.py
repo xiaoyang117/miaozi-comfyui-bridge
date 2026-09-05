@@ -153,25 +153,38 @@ class ComfyUIClient:
                  width: Optional[int] = None,
                  height: Optional[int] = None,
                  width_placeholder: str = "",
-                 height_placeholder: str = "") -> Optional[Path]:
-        """替换占位符 + 设置尺寸 + 提交 + 轮询 + 下载图片。"""
+                 height_placeholder: str = "",
+                 progress_cb=None) -> Optional[Path]:
+        """替换占位符 + 设置尺寸 + 提交 + 轮询 + 下载图片。
+
+        progress_cb: 可选回调 progress_cb(str)，等待期间周期回报进度文案。
+        """
         self.output_dir.mkdir(parents=True, exist_ok=True)
         wf = self.apply_prompt(workflow, prompt, placeholder)
         wf = self.apply_size(wf, width, height, width_placeholder, height_placeholder)
 
         prompt_id = self.submit(wf)
-        return self._wait_and_download(prompt_id, save_node_id)
+        return self._wait_and_download(prompt_id, save_node_id,
+                                       progress_cb=progress_cb)
 
     def _wait_and_download(self, prompt_id: str,
-                           save_node_id: str) -> Optional[Path]:
+                           save_node_id: str,
+                           progress_cb=None) -> Optional[Path]:
         start = time.time()
         timeout = 300
+        if progress_cb:
+            progress_cb(f"已提交 ComfyUI，排队等待执行…")
         while time.time() - start < timeout:
             time.sleep(1)
+            # 周期回报：执行中已等待秒数
+            if progress_cb and int(time.time() - start) % 2 == 0:
+                progress_cb(f"ComfyUI 生成中… 已等待 {int(time.time()-start)}s")
             try:
                 r = self._session.get(
                     f"{self.server_url}/history/{prompt_id}", timeout=10)
             except requests.RequestException:
+                if progress_cb:
+                    progress_cb("查询 ComfyUI 状态失败，正在重试…")
                 continue
             if r.status_code != 200:
                 continue
@@ -196,6 +209,8 @@ class ComfyUIClient:
 
             path = self._download_images(entry, save_node_id)
             if path:
+                if progress_cb:
+                    progress_cb("生成完成，正在保存图片…")
                 return path
             # 若已执行完成但没匹配到图，退化为遍历所有输出
             if status.get("completed") or status.get("status_str") == "success":
@@ -203,6 +218,8 @@ class ComfyUIClient:
                             "尝试遍历全部输出", save_node_id)
                 path = self._download_images(entry, save_node_id, fallback=True)
                 if path:
+                    if progress_cb:
+                        progress_cb("生成完成，正在保存图片…")
                     return path
                 # 任务已完成但找不到任何图片 => 直接失败而非空转
                 raise RuntimeError(
