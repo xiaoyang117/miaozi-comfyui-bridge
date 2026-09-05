@@ -1,0 +1,799 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>喵梓二号 · ComfyUI 生图助手</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="container">
+
+  <!-- ================= 头部 ================= -->
+  <div class="header">
+    <h1>喵梓二号<small>ComfyUI 生图助手</small></h1>
+    <nav class="tabs">
+      <button class="tab active" data-tab="chat" onclick="switchTab('chat')">对话</button>
+      <button class="tab" data-tab="settings" onclick="switchTab('settings')">配置</button>
+    </nav>
+  </div>
+
+  <!-- ================= 对话面板 ================= -->
+  <div id="panel-chat" class="panel active">
+    <!-- 顶部操作条 -->
+    <div class="chat-toolbar">
+      <div class="toolbar-group">
+        <label class="toggle-label" title="启用后会在生图前搜索角色特征标签作为参考">
+          <input type="checkbox" id="useSearch" checked>
+          <span class="toggle-slider"></span>角色搜索
+        </label>
+      </div>
+      <div class="toolbar-sep"></div>
+      <div class="toolbar-group">
+        <select id="searchUrlIdx" title="选择搜索源"></select>
+      </div>
+      <div class="toolbar-sep"></div>
+      <div class="toolbar-group">
+        <select id="chat_workflow" title="选择工作流"></select>
+      </div>
+      <div class="toolbar-sep"></div>
+      <div class="toolbar-group chat-resolution">
+        <select id="chat_resolution" title="选择输出分辨率"></select>
+      </div>
+      <div class="toolbar-sep"></div>
+      <div class="toolbar-group" style="margin-left:auto">
+        <input type="text" id="chat_role" placeholder="角色标签(可选): shiroko, blue_archive" title="手动指定角色（英文标签/中文名），可跳过角色识别" style="min-width:220px">
+      </div>
+      <div class="toolbar-group">
+        <button class="btn-secondary btn-danger" onclick="clearChatLog()">清空记录</button>
+      </div>
+    </div>
+
+    <div id="chatMessages" class="chat-messages"></div>
+
+    <div id="stepIndicator" class="step-indicator hidden">
+      <span class="step-dot"></span>
+      <span id="stepText">准备中...</span>
+    </div>
+
+    <div class="chat-input-bar">
+      <div class="chat-input-row">
+        <div class="textarea-wrap">
+          <textarea id="chatInput" rows="2" placeholder="描述你想要生成的图片，如：碧蓝档案的白子，银白色长发，蓝色眼睛… (Enter 发送 / Shift+Enter 换行)"></textarea>
+          <label class="btn-img-inline" title="上传参考图片">
+            <input type="file" accept="image/*" multiple onchange="onImageSelect()">
+            📷 参考图
+          </label>
+        </div>
+        <button class="send-btn" id="chatSendBtn" onclick="sendMessage()">生成</button>
+      </div>
+      <div id="imagePreview" class="image-preview hidden"></div>
+      <div class="kbd-hint">分辨率取上方下拉；发送后如需取消，请等待当前任务结束</div>
+    </div>
+  </div>
+
+  <!-- ================= 配置面板 ================= -->
+  <div id="panel-settings" class="panel">
+    <div class="settings-head">
+      <button onclick="saveSettings()">💾 保存配置</button>
+      <button class="btn-secondary" onclick="loadSettings(true)">↻ 重新加载</button>
+    </div>
+
+    <!-- LLM -->
+    <div class="settings-group">
+      <h3>LLM 提示词生成</h3>
+      <label>API 地址（OpenAI 兼容）</label>
+      <input id="s_llm_base_url" placeholder="http://127.0.0.1:8080/v1">
+      <label>API Key</label>
+      <input id="s_llm_api_key" type="password" oncopy="return false" oncut="return false" placeholder="无鉴权可留空">
+      <label>模型名称</label>
+      <input id="s_llm_model" placeholder="qwen2.5:7b">
+      <div class="btn-inline-row">
+        <button class="btn-secondary" onclick="testLLM()">测试连接</button>
+        <button class="btn-secondary" onclick="testLLMRaw()">原始响应</button>
+      </div>
+      <label>自定义系统提示词（留空使用默认）</label>
+      <textarea id="s_custom_system_prompt" rows="6" placeholder="You are a prompt engineer..."></textarea>
+    </div>
+
+    <!-- VLM -->
+    <div class="settings-group">
+      <h3>VLM 图片识别</h3>
+      <label>API 地址（OpenAI 兼容，支持图片输入）</label>
+      <input id="s_vlm_base_url" placeholder="留空则不启用图片识别">
+      <label>API Key</label>
+      <input id="s_vlm_api_key" type="password" oncopy="return false" oncut="return false">
+      <label>模型名称</label>
+      <input id="s_vlm_model" placeholder="如 qwen-vl-plus / gpt-4o-mini">
+      <p class="field-hint">上传参考图后，会先让 VLM 识别图中角色外貌，再据此生成提示词</p>
+    </div>
+
+    <!-- ComfyUI -->
+    <div class="settings-group">
+      <h3>ComfyUI 服务</h3>
+      <label>ComfyUI 地址</label>
+      <input id="s_comfyui_url" placeholder="http://127.0.0.1:8188">
+      <div class="btn-inline-row">
+        <button class="btn-secondary" onclick="testComfyUI()">测试连接</button>
+      </div>
+    </div>
+
+    <!-- 工作流 -->
+    <div class="settings-group">
+      <h3>工作流</h3>
+      <div class="settings-row">
+        <div>
+          <label>提示词占位符</label>
+          <input id="s_prompt_placeholder">
+        </div>
+        <div>
+          <label>保存节点 ID (SaveImage)</label>
+          <input id="s_save_node_id">
+        </div>
+      </div>
+      <p class="field-hint">占位符会出现在工作流正向提示词节点中，将被 LLM 生成的提示词替换。</p>
+      <label>默认工作流（相对名或留空=default_workflow.json）</label>
+      <input id="s_workflow_path" placeholder="default_workflow.json">
+    </div>
+
+    <!-- 分辨率 -->
+    <div class="settings-group">
+      <h3>默认分辨率</h3>
+      <div class="settings-row">
+        <div>
+          <label>宽度 (px)</label>
+          <input id="s_gen_width" type="number" min="64" max="4096">
+        </div>
+        <div>
+          <label>高度 (px)</label>
+          <input id="s_gen_height" type="number" min="64" max="4096">
+        </div>
+      </div>
+      <label>分辨率预设（对话框下拉可选，格式：名称|宽x高）</label>
+      <div id="resPresetList"></div>
+      <div class="btn-inline-row">
+        <button class="btn-add-source" style="flex:0 0 100%" onclick="addResPreset()">+ 添加预设</button>
+        <button class="btn-secondary" onclick="reloadResPresets()">恢复默认预设</button>
+      </div>
+      <p class="field-hint">提交给 ComfyUI 前会自动改写工作流中的 EmptyLatentImage 节点尺寸。</p>
+    </div>
+
+    <!-- 搜索 -->
+    <div class="settings-group">
+      <h3>角色搜索</h3>
+      <div class="toggle-row">
+        <label class="toggle-label">
+          <input type="checkbox" id="s_use_browser_search">
+          <span class="toggle-slider"></span>浏览器搜索（需 Playwright + Chromium）
+        </label>
+      </div>
+      <label>本地角色库查询测试</label>
+      <input id="s_character_query" placeholder="如：白子 / shiroko / 碧蓝档案的白子">
+      <div class="btn-inline-row">
+        <button class="btn-secondary" onclick="testCharacters()">测试角色查询</button>
+        <button class="btn-secondary" onclick="testResolve()">🔍 解析诊断</button>
+      </div>
+      <p class="field-hint">支持中文名（内置常见角色）、英文/罗马音、或任意描述（如"碧蓝档案的白子"）。命中后特征标签会自动作为生图参考；解析失败时可用对话栏的"角色标签"框手动指定。</p>
+
+      <hr class="sep">
+      <label>搜索源管理</label>
+      <div id="sourceList" class="source-list"></div>
+      <button class="btn-add-source" onclick="addSource()">+ 添加搜索源</button>
+      <div class="btn-inline-row" style="margin-top:0">
+        <button class="btn-secondary" onclick="saveSources()">保存搜索源</button>
+      </div>
+
+      <label>Tavily API Key（浏览器搜索关闭时使用）</label>
+      <input id="s_tavily_key" type="password" oncopy="return false" oncut="return false" placeholder="留空则不启用">
+      <label>结果数量</label>
+      <input id="s_tavily_max_results" type="number" min="1" max="20">
+      <div class="btn-inline-row">
+        <button class="btn-secondary" onclick="testSearch()">测试 Tavily 搜索</button>
+      </div>
+    </div>
+
+    <!-- 对话 -->
+    <div class="settings-group">
+      <h3>对话</h3>
+      <label>历史上下文轮数</label>
+      <input id="s_history_rounds" type="number" min="0" max="20">
+      <p class="field-hint">每轮=用户消息+助手回复；设为 0 则每次都是全新对话。</p>
+    </div>
+
+    <div id="settingsError" class="error hidden">
+      <pre id="settingsErrorText" class="error-content"></pre>
+      <button class="error-dismiss" onclick="hideError('settingsError')">✕</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 通用错误弹窗 ================= -->
+<div id="errorModal" class="modal-overlay hidden">
+  <div class="modal-box">
+    <div id="modalHeader" class="modal-header">ERROR</div>
+    <pre id="modalErrorText" class="modal-body"></pre>
+    <button class="modal-btn" onclick="closeModal()">确定</button>
+  </div>
+</div>
+
+<!-- ================= 图片放大弹窗 ================= -->
+<div id="imageModal" class="modal-overlay hidden" onclick="closeImageModal()">
+  <div class="modal-image-box" onclick="event.stopPropagation()">
+    <img id="modalImage" class="modal-image" src="" alt="大图预览">
+    <button class="modal-close-btn" onclick="closeImageModal()">✕</button>
+  </div>
+</div>
+
+<script>
+// ================= 标签页 =================
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
+}
+
+// ================= 图片放大 =================
+function showImageModal(url) {
+  document.getElementById('modalImage').src = url;
+  document.getElementById('imageModal').classList.remove('hidden');
+}
+function closeImageModal() {
+  document.getElementById('imageModal').classList.add('hidden');
+  document.getElementById('modalImage').src = '';
+}
+
+// ================= 错误提示 =================
+function showError(id, msg) {
+  const el = document.getElementById(id);
+  el.querySelector('.error-content').textContent = msg;
+  el.classList.remove('hidden');
+}
+function hideError(id) { document.getElementById(id).classList.add('hidden'); }
+function showModal(msg, type) {
+  const h = document.getElementById('modalHeader');
+  h.textContent = (type === 'success' ? '✅ 完成' : '⚠️ ERROR');
+  h.className = 'modal-header ' + (type === 'success' ? 'modal-success' : 'modal-error');
+  document.getElementById('modalErrorText').textContent = msg;
+  document.getElementById('errorModal').classList.remove('hidden');
+}
+function closeModal() { document.getElementById('errorModal').classList.add('hidden'); }
+
+// ================= 全局状态 =================
+let chatHistory = [];
+let chatLog = [];
+let isGenerating = false;
+let selectedImages = [];
+let userImageCache = {};
+let searchSources = [];
+let resPresets = [];
+
+// ================= 分辨率预设 =================
+function parseResPresets(raw) {
+  // 支持 {label,width,height} 或 "名称|宽x高"
+  if (Array.isArray(raw)) return raw.filter(p => p && p.width && p.height);
+  return [];
+}
+function renderResPresetEditor() {
+  const box = document.getElementById('resPresetList');
+  box.innerHTML = '';
+  resPresets.forEach((p, i) => {
+    const row = document.createElement('div');
+    row.className = 'source-row';
+    row.innerHTML = `
+      <input class="source-name" value="${escapeHtml(p.label||'')}" data-idx="${i}" placeholder="名称">
+      <input value="${p.width||''}" data-idx="${i}" data-k="w" placeholder="宽">
+      <span style="color:var(--text-faint)">×</span>
+      <input value="${p.height||''}" data-idx="${i}" data-k="h" placeholder="高">
+      <button class="btn-del-source" onclick="removeResPreset(${i})">×</button>`;
+    box.appendChild(row);
+  });
+}
+function addResPreset() { resPresets.push({label:'新预设', width:896, height:1152}); renderResPresetEditor(); }
+function removeResPreset(i) { resPresets.splice(i,1); renderResPresetEditor(); }
+function collectResPresets() {
+  document.querySelectorAll('#resPresetList .source-row').forEach(row => {
+    const i = parseInt(row.querySelector('.source-name').dataset.idx);
+    const w = parseInt(row.querySelector('[data-k="w"]').value);
+    const h = parseInt(row.querySelector('[data-k="h"]').value);
+    if (!isNaN(w) && !isNaN(h)) {
+      resPresets[i] = { label: row.querySelector('.source-name').value.trim() || (w+'×'+h), width: w, height: h };
+    }
+  });
+  resPresets = resPresets.filter(p => p && p.width && p.height);
+}
+function reloadResPresets() {
+  resPresets = [{label:'896×1152',width:896,height:1152},{label:'1152×896',width:1152,height:896},{label:'832×1216',width:832,height:1216},{label:'1216×832',width:1216,height:832},{label:'1024×1024',width:1024,height:1024}];
+  renderResPresetEditor();
+}
+function populateResDropdown() {
+  const sel = document.getElementById('chat_resolution');
+  sel.innerHTML = '';
+  if (!resPresets.length) {
+    const opt = document.createElement('option'); opt.value=''; opt.textContent='自定义'; sel.appendChild(opt);
+    return;
+  }
+  resPresets.forEach((p,i) => {
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = p.label || (p.width+'×'+p.height);
+    opt.dataset.w = p.width; opt.dataset.h = p.height;
+    sel.appendChild(opt);
+  });
+}
+function currentResolution() {
+  const sel = document.getElementById('chat_resolution');
+  const opt = sel.selectedOptions[0];
+  if (opt && opt.dataset && opt.dataset.w) {
+    return { width: parseInt(opt.dataset.w), height: parseInt(opt.dataset.h) };
+  }
+  return { width: parseInt(document.getElementById('s_gen_width').value)||0,
+           height: parseInt(document.getElementById('s_gen_height').value)||0 };
+}
+
+// ================= 图片选择 =================
+function onImageSelect() {
+  const input = document.querySelector('.btn-img-inline input');
+  const files = Array.from(input.files);
+  if (!files.length) return;
+  addImages(files);
+  input.value = '';
+}
+function addImages(files) {
+  const preview = document.getElementById('imagePreview');
+  preview.classList.remove('hidden');
+  // 清掉旧的删除按钮标记（重建时避免重复删除按钮）
+  preview.innerHTML = '';
+  files.forEach(file => {
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      selectedImages.push(e.target.result);
+      const thumb = document.createElement('img');
+      thumb.src = e.target.result;
+      preview.appendChild(thumb);
+    };
+    reader.readAsDataURL(file);
+  });
+  // 重建删除按钮
+  if (!preview.querySelector('.btn-remove-img')) {
+    const btn = document.createElement('button');
+    btn.className = 'btn-remove-img'; btn.textContent = '✕';
+    btn.onclick = removeImage; btn.title = '移除全部图片';
+    preview.appendChild(btn);
+  }
+}
+function removeImage() {
+  selectedImages = [];
+  const preview = document.getElementById('imagePreview');
+  preview.innerHTML = '';
+  preview.classList.add('hidden');
+}
+
+// ================= 聊天记录持久化 =================
+function saveChatLog() { localStorage.setItem('chatLog', JSON.stringify(chatLog)); }
+function loadChatLog() { try { const r=localStorage.getItem('chatLog'); return r?JSON.parse(r):[]; } catch { return []; } }
+function restoreChatLog() { chatLog = loadChatLog(); chatLog.forEach((e,i)=>addChatBubble(e.role,e.text,e.imageUrl,e.search,i,e.vlm)); }
+function clearChatLog() {
+  if (!confirm('确定清空所有聊天记录？')) return;
+  chatLog = []; chatHistory = []; userImageCache = {};
+  localStorage.removeItem('chatLog');
+  document.getElementById('chatMessages').innerHTML = '';
+  hideStep();
+}
+
+// ================= 步骤指示 =================
+function setStep(step) {
+  const el = document.getElementById('stepIndicator');
+  el.classList.remove('step-done');
+  const text = document.getElementById('stepText');
+  const steps = ['🖼️ 图片识别中...','🔎 搜索角色特征...','🧠 LLM 生成提示词...','⚙️ 提交 ComfyUI 生成中...'];
+  text.textContent = steps[step] || ('进行中 ' + (step||''));
+  el.classList.remove('hidden');
+}
+function hideStep() { document.getElementById('stepIndicator').classList.add('hidden'); }
+
+// ================= 气泡渲染 =================
+function addChatBubble(role, text, imageUrl, searchInfo, index, vlmText) {
+  const container = document.getElementById('chatMessages');
+  const div = document.createElement('div');
+  div.className = 'chat-bubble ' + (role === 'user' ? 'chat-user' : 'chat-assistant');
+  if (index !== undefined) div.dataset.index = index;
+
+  // 删除按钮
+  const delBtn = document.createElement('button');
+  delBtn.className = 'btn-del-msg'; delBtn.textContent = '×'; delBtn.title = '删除此条';
+  delBtn.onclick = function(e) {
+    e.stopPropagation();
+    let idx = parseInt(div.dataset.index); if (isNaN(idx)) return;
+    let pair = -1;
+    if (chatLog[idx] && chatLog[idx].role === 'user' && idx+1 < chatLog.length && chatLog[idx+1].role === 'assistant') pair = idx+1;
+    else if (chatLog[idx] && chatLog[idx].role === 'assistant' && idx-1 >= 0 && chatLog[idx-1].role === 'user') pair = idx-1;
+    if (pair >= 0) {
+      if (pair < idx) { const t=idx; idx=pair; pair=t; }
+      chatLog.splice(pair,1); chatHistory.splice(pair,1);
+      delete userImageCache[pair]; delete userImageCache[idx];
+    }
+    chatLog.splice(idx,1); chatHistory.splice(idx,1); delete userImageCache[idx];
+    saveChatLog();
+    container.innerHTML=''; chatLog.forEach((e2,i)=>addChatBubble(e2.role,e2.text,e2.imageUrl,e2.search,i,e2.vlm));
+  };
+  div.appendChild(delBtn);
+
+  function makeCollapsible(label, contentEl) {
+    const wrap = document.createElement('div'); wrap.className='collapsible';
+    const header = document.createElement('div'); header.className='coll-header'; header.textContent=label;
+    const body = document.createElement('div'); body.className='coll-body'; body.appendChild(contentEl);
+    wrap.appendChild(header); wrap.appendChild(body);
+    header.addEventListener('click', ()=>wrap.classList.toggle('coll-open'));
+    return wrap;
+  }
+
+  if (role === 'user') {
+    if (text) div.appendChild(document.createTextNode(text));
+    if (index !== undefined && chatLog[index] && chatLog[index].hasImage) {
+      const badge = document.createElement('div'); badge.className='chat-has-image'; badge.textContent='📎 含参考图片';
+      const cached = userImageCache[index];
+      if (cached && cached.length) cached.forEach(url => {
+        const th = document.createElement('img'); th.className='chat-thumb'; th.src=url;
+        div.insertBefore(th, div.firstChild);
+      });
+      div.insertBefore(badge, div.firstChild);
+    }
+  } else {
+    if (vlmText) {
+      const p = document.createElement('pre'); p.className='chat-search-results'; p.textContent=vlmText;
+      div.appendChild(makeCollapsible('🖼️ 图片分析', p));
+    }
+    if (searchInfo) {
+      const q = searchInfo.query || '';
+      const via = searchInfo.via ? ' · ' + searchInfo.via : '';
+      if (searchInfo.results) {
+        const p = document.createElement('pre'); p.className='chat-search-results'; p.textContent=searchInfo.results;
+        div.appendChild(makeCollapsible('📚 角色参考: ' + q + via, p));
+      } else if (searchInfo.error) {
+        const p = document.createElement('pre'); p.className='chat-search-results'; p.textContent='未匹配到角色：'+searchInfo.error;
+        div.appendChild(makeCollapsible('🔎 角色搜索(未匹配)' + via, p));
+      }
+      if (searchInfo.role_missed) {
+        const tip = document.createElement('div');
+        tip.className = 'chat-has-image';
+        tip.textContent = '⚠️ 手动指定的角色标签未找到，请检查拼写（如 shiroko, blue_archive）';
+        div.appendChild(tip);
+      }
+    }
+    if (text) {
+      const p = document.createElement('pre'); p.className='chat-prompt'; p.textContent=text;
+      div.appendChild(makeCollapsible('✨ 生成提示词', p));
+    }
+    if (imageUrl) {
+      const wrap = document.createElement('div'); wrap.className='chat-image-wrap';
+      const img = document.createElement('img'); img.className='chat-image'; img.src=imageUrl; img.alt='生成结果';
+      wrap.appendChild(img);
+      const zoom = document.createElement('button'); zoom.className='btn-zoom'; zoom.textContent='🔍 放大';
+      zoom.onclick = ()=>showImageModal(imageUrl);
+      wrap.appendChild(zoom);
+      div.appendChild(wrap);
+
+      const acts = document.createElement('div'); acts.className='chat-actions';
+      const copyBtn = document.createElement('button'); copyBtn.className='action-btn'; copyBtn.innerHTML='📋 复制';
+      copyBtn.onclick = async function(){
+        try { const r=await fetch(imageUrl); const b=await r.blob();
+          await navigator.clipboard.write([new ClipboardItem({'image/png':b})]);
+          flashBtn(copyBtn,'✓ 已复制','ok'); } catch(e){ flashBtn(copyBtn,'复制失败',''); }
+      };
+      const saveBtn = document.createElement('button'); saveBtn.className='action-btn'; saveBtn.innerHTML='💾 保存';
+      saveBtn.onclick = async function(){
+        try { const r=await fetch(imageUrl); const b=await r.blob();
+          const u=URL.createObjectURL(b); const a=document.createElement('a');
+          a.href=u; a.download='miaozi_'+Date.now()+'.png'; document.body.appendChild(a); a.click();
+          a.remove(); URL.revokeObjectURL(u); flashBtn(saveBtn,'✓ 已保存','ok'); } catch(e){ flashBtn(saveBtn,'保存失败',''); }
+      };
+      acts.appendChild(copyBtn); acts.appendChild(saveBtn);
+      div.appendChild(acts);
+    }
+  }
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+function flashBtn(btn, txt, cls) {
+  const old = btn.innerHTML;
+  btn.textContent = txt; btn.className = 'action-btn ' + (cls||'');
+  setTimeout(()=>{ btn.innerHTML = old; btn.className='action-btn'; }, 1800);
+}
+
+// ================= 工作流 =================
+async function loadWorkflowList() {
+  const sel = document.getElementById('chat_workflow');
+  sel.innerHTML = '<option>加载中...</option>';
+  try {
+    const r = await fetch('/api/workflows'); const d = await r.json();
+    sel.innerHTML = '';
+    if (d.success && d.workflows.length) {
+      d.workflows.forEach((wf,i)=>{ const o=document.createElement('option'); o.value=wf.path; o.textContent=wf.name; sel.appendChild(o); });
+    } else { sel.innerHTML='<option value="">无工作流文件</option>'; }
+  } catch { sel.innerHTML='<option value="">加载失败</option>'; }
+}
+
+// ================= 发送 =================
+async function sendMessage() {
+  if (isGenerating) return;
+  const input = document.getElementById('chatInput');
+  const text = input.value.trim();
+  if (!text) return;
+
+  isGenerating = true;
+  const sendBtn = document.getElementById('chatSendBtn');
+  sendBtn.disabled = true; sendBtn.textContent = '⏳ 生成中...';
+  input.value = '';
+
+  const hasImage = selectedImages.length > 0;
+  const imageData = selectedImages.slice();
+  const res = currentResolution();
+
+  chatHistory.push({ role:'user', content:text });
+  chatLog.push({ role:'user', text, hasImage });
+  userImageCache[chatLog.length-1] = imageData;
+  addChatBubble('user', text, null, null, chatLog.length-1);
+  removeImage();
+
+  try {
+    const useSearch = document.getElementById('useSearch').checked;
+    const wfSel = document.getElementById('chat_workflow');
+    const wfPath = wfSel.value || '';
+    const historyRounds = parseInt(document.getElementById('s_history_rounds').value) || 0;
+    let promptText = text;
+    if (historyRounds > 0 && chatHistory.length >= 2) {
+      const recent = chatHistory.slice(-(historyRounds*2));
+      const ctx = recent.map(m => (m.role==='user'?'用户: ':'助手: ')+m.content).join('\n');
+      promptText = '历史对话:\n'+ctx+'\n\n用户当前输入: '+text;
+    }
+
+    let response;
+    const roleTag = document.getElementById('chat_role').value.trim();
+    for (let attempt=1; attempt<=90; attempt++) {
+      response = await fetch('/api/generate', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          prompt: promptText, use_search: useSearch,
+          role: roleTag,
+          history: [], search_url_idx: parseInt(document.getElementById('searchUrlIdx').value)||0,
+          workflow_path: wfPath,
+          width: res.width, height: res.height,
+          image: hasImage ? imageData : [],
+        })
+      });
+      const ct = response.headers.get('content-type')||'';
+      if (ct.includes('text/event-stream')) { hideStep(); break; }
+      const d = await response.json();
+      if (d.queue) {
+        document.getElementById('stepText').textContent = `排队中… (第${attempt}次)`;
+        document.getElementById('stepIndicator').classList.remove('hidden');
+        await new Promise(r=>setTimeout(r,2000)); continue;
+      }
+      break;
+    }
+
+    const ct = response.headers.get('content-type')||'';
+    if (!ct.includes('text/event-stream')) {
+      const d = await response.json();
+      if (d && d.queue) {
+        rollbackLast(); addChatBubble('assistant','排队超时，请稍后重试');
+        showModal('排队超时，请稍后重试'); return;
+      }
+      throw new Error(d.error || '请求失败');
+    }
+
+    // 读取 SSE
+    hideStep();
+    const reader = response.body.getReader(); const decoder = new TextDecoder();
+    let buffer='', result=null;
+    while (true) {
+      const {done,value} = await reader.read(); if (done) break;
+      buffer += decoder.decode(value,{stream:true});
+      const lines = buffer.split('\n'); buffer = lines.pop()||'';
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const evt = JSON.parse(line.slice(6));
+        if (evt.step==='vlm') setStep(0);
+        else if (evt.step==='search') setStep(1);
+        else if (evt.step==='llm') setStep(2);
+        else if (evt.step==='comfyui') setStep(3);
+        else if (evt.step==='done') result = evt;
+        else if (evt.step==='error') throw new Error(evt.error);
+      }
+    }
+    if (result) {
+      chatHistory.push({role:'assistant',content:result.prompt});
+      chatLog.push({role:'assistant',text:result.prompt,imageUrl:result.image,search:result.search,vlm:result.vlm});
+      saveChatLog();
+      const cacheBust = result.image + '?cb=' + Date.now()+'_'+Math.random().toString(36).slice(2,6);
+      addChatBubble('assistant', result.prompt, cacheBust, result.search, chatLog.length-1, result.vlm);
+      const st = document.getElementById('stepIndicator');
+      document.getElementById('stepText').textContent = '✅ 生成完成'; st.classList.add('step-done');
+      setTimeout(hideStep, 1200);
+    } else { throw new Error('未收到完成事件'); }
+  } catch(e) {
+    rollbackLast();
+    const errMsg = e.message || '生成失败';
+    const st = document.getElementById('stepIndicator');
+    document.getElementById('stepText').textContent = '❌ ' + errMsg; st.classList.add('step-done');
+    setTimeout(hideStep, 2000);
+    addChatBubble('assistant', '⚠️ 错误: ' + errMsg);
+    showModal('ERROR: ' + errMsg);
+  } finally {
+    isGenerating = false;
+    sendBtn.disabled = false; sendBtn.textContent = '生成';
+  }
+}
+function rollbackLast() {
+  chatLog.pop(); chatHistory.pop(); saveChatLog();
+  const all = document.querySelectorAll('#chatMessages .chat-bubble');
+  if (all.length) all[all.length-1].remove();
+}
+
+// Enter 发送
+document.getElementById('chatInput').addEventListener('keydown', function(e) {
+  if (e.key==='Enter' && !e.shiftKey && !isGenerating) { e.preventDefault(); sendMessage(); }
+});
+// 角色框 Enter 也发送
+document.getElementById('chat_role').addEventListener('keydown', function(e) {
+  if (e.key==='Enter' && !isGenerating) { e.preventDefault(); sendMessage(); }
+});
+// 拖拽上传
+const chatInputEl = document.getElementById('chatInput');
+chatInputEl.addEventListener('dragover', e=>{ e.preventDefault(); chatInputEl.style.borderColor='#6366f1'; });
+chatInputEl.addEventListener('dragleave', ()=>{ chatInputEl.style.borderColor=''; });
+chatInputEl.addEventListener('drop', function(e){
+  e.preventDefault(); chatInputEl.style.borderColor='';
+  const files = Array.from(e.dataTransfer.files).filter(f=>f.type.startsWith('image/'));
+  if (files.length) addImages(files);
+});
+
+// ================= 搜索源管理 =================
+function renderSourceList() {
+  const list = document.getElementById('sourceList'); list.innerHTML='';
+  searchSources.forEach((src,i)=>{
+    const row = document.createElement('div'); row.className='source-row';
+    row.innerHTML = `
+      <input class="source-name" value="${escapeHtml(src.name)}" placeholder="名称" data-idx="${i}">
+      <input value="${escapeHtml(src.url)}" placeholder="https://...?q={query}" data-idx="${i}" data-k="url">
+      <button class="btn-del-source" onclick="removeSource(${i})">×</button>`;
+    list.appendChild(row);
+  });
+}
+function populateSourceDropdown() {
+  const sel = document.getElementById('searchUrlIdx'); sel.innerHTML='';
+  searchSources.forEach((src,i)=>{ const o=document.createElement('option'); o.value=i; o.textContent=src.name||'未命名'; sel.appendChild(o); });
+}
+function escapeHtml(s){ return String(s??'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function addSource(){ searchSources.push({name:'',url:''}); renderSourceList(); }
+function removeSource(i){ searchSources.splice(i,1); renderSourceList(); }
+function collectSources(){
+  document.querySelectorAll('#sourceList .source-row').forEach(row=>{
+    const i = parseInt(row.querySelector('.source-name').dataset.idx);
+    searchSources[i] = { name: row.querySelector('.source-name').value.trim(),
+                         url: row.querySelector('[data-k="url"]').value.trim() };
+  });
+}
+async function saveSources() {
+  collectSources();
+  searchSources = searchSources.filter(s=>s.url);
+  if (!searchSources.length) searchSources=[{name:'Bing',url:'https://www.bing.com/search?q={query}&count={count}'}];
+  const r = await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({search_sources:searchSources})});
+  const d = await r.json();
+  if (d.success){ renderSourceList(); populateSourceDropdown(); showModal('搜索源已保存','success'); }
+  else showModal('保存失败: '+(d.error||''),'error');
+}
+
+// ================= 配置读写 =================
+async function loadSettings(silent) {
+  try {
+    const r = await fetch('/api/settings'); const d = await r.json();
+    if (d.success) {
+      const s = d.settings;
+      const $ = id => document.getElementById(id);
+      $('s_llm_base_url').value = s.llm_base_url||'';
+      $('s_llm_api_key').value = s.llm_api_key||'';
+      $('s_llm_model').value = s.llm_model||'';
+      $('s_vlm_base_url').value = s.vlm_base_url||'';
+      $('s_vlm_api_key').value = s.vlm_api_key||'';
+      $('s_vlm_model').value = s.vlm_model||'';
+      $('s_custom_system_prompt').value = s.custom_system_prompt||'';
+      $('s_tavily_key').value = s.tavily_key||'';
+      $('s_tavily_max_results').value = s.tavily_max_results??5;
+      $('s_comfyui_url').value = s.comfyui_url||'';
+      $('s_prompt_placeholder').value = s.prompt_placeholder||'114514.1919810';
+      $('s_save_node_id').value = s.save_node_id||'9';
+      $('s_workflow_path').value = (s.workflow_path && s.workflow_path.includes('/')) ? (s.workflow_path.split('/').pop()) : (s.workflow_path||'default_workflow.json');
+      $('s_gen_width').value = s.gen_width??896;
+      $('s_gen_height').value = s.gen_height??1152;
+      $('s_history_rounds').value = s.history_rounds??2;
+      const bs = !!s.use_browser_search;
+      $('s_use_browser_search').checked = bs;
+      searchSources = Array.isArray(s.search_sources)&&s.search_sources.length ? s.search_sources
+                    : [{name:'Bing',url:'https://www.bing.com/search?q={query}&count={count}'}];
+      resPresets = parseResPresets(s.resolution_presets);
+      renderSourceList(); populateSourceDropdown();
+      renderResPresetEditor(); populateResDropdown();
+      if (!silent) console.log('settings loaded');
+    } else if (!silent) console.warn('settings load failed', d);
+  } catch(e) { if (!silent) console.warn('settings load error', e); }
+}
+
+async function saveSettings() {
+  hideError('settingsError');
+  collectSources();
+  collectResPresets();
+  const $ = id => document.getElementById(id);
+  const wfName = $('s_workflow_path').value.trim();
+  const body = {
+    llm_base_url: $('s_llm_base_url').value.trim(),
+    llm_api_key: $('s_llm_api_key').value.trim(),
+    llm_model: $('s_llm_model').value.trim(),
+    vlm_base_url: $('s_vlm_base_url').value.trim(),
+    vlm_api_key: $('s_vlm_api_key').value.trim(),
+    vlm_model: $('s_vlm_model').value.trim(),
+    custom_system_prompt: $('s_custom_system_prompt').value,
+    tavily_key: $('s_tavily_key').value.trim(),
+    tavily_max_results: parseInt($('s_tavily_max_results').value)||5,
+    use_browser_search: $('s_use_browser_search').checked,
+    comfyui_url: $('s_comfyui_url').value.trim(),
+    prompt_placeholder: $('s_prompt_placeholder').value.trim(),
+    save_node_id: $('s_save_node_id').value.trim(),
+    workflow_path: wfName || 'default_workflow.json',
+    gen_width: parseInt($('s_gen_width').value)||896,
+    gen_height: parseInt($('s_gen_height').value)||1152,
+    resolution_presets: resPresets,
+    search_sources: searchSources,
+    history_rounds: parseInt($('s_history_rounds').value)||0,
+  };
+  try {
+    const r = await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d = await r.json();
+    if (d.success) {
+      showModal('配置已保存 ✅','success');
+      renderSourceList(); populateSourceDropdown(); renderResPresetEditor(); populateResDropdown();
+    } else showError('settingsError', d.error||'保存失败');
+  } catch(e) { showError('settingsError','保存失败: '+e.message); }
+}
+
+// ================= 测试接口 =================
+async function testLLM() {
+  hideError('settingsError'); const $=id=>document.getElementById(id);
+  const body={ llm_base_url:$('s_llm_base_url').value.trim(), llm_api_key:$('s_llm_api_key').value.trim(), llm_model:$('s_llm_model').value.trim(), custom_system_prompt:$('s_custom_system_prompt').value };
+  try { const r=await fetch('/api/test/llm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const d=await r.json();
+    showError('settingsError', d.success?'✅ LLM 成功:\n'+d.prompt:'❌ LLM 失败:\n'+(d.error||'')); } catch(e){ showError('settingsError','请求失败: '+e.message); }
+}
+async function testLLMRaw() {
+  hideError('settingsError'); const $=id=>document.getElementById(id);
+  const body={ llm_base_url:$('s_llm_base_url').value.trim(), llm_api_key:$('s_llm_api_key').value.trim(), llm_model:$('s_llm_model').value.trim() };
+  try { const r=await fetch('/api/test/llm/raw',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const d=await r.json();
+    showError('settingsError','=== 原始响应 ===\nHTTP '+d.status+'\n\n'+(d.body||'(空)')); } catch(e){ showError('settingsError','请求失败: '+e.message); }
+}
+async function testSearch() {
+  hideError('settingsError'); const key=document.getElementById('s_tavily_key').value.trim();
+  if(!key){ showError('settingsError','请输入 Tavily Key'); return; }
+  try { const r=await fetch('/api/test/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tavily_key:key})}); const d=await r.json();
+    showError('settingsError', d.success?'✅ 搜索成功!\n'+d.results:'❌ 搜索失败:\n'+(d.error||'')); } catch(e){ showError('settingsError','请求失败: '+e.message); }
+}
+async function testComfyUI() {
+  hideError('settingsError'); const body={ comfyui_url: document.getElementById('s_comfyui_url').value.trim() };
+  try { const r=await fetch('/api/test/comfyui',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const d=await r.json();
+    showError('settingsError', d.success?'✅ ComfyUI 连接成功!':'❌ ComfyUI 失败:\n'+(d.error||'')); } catch(e){ showError('settingsError','请求失败: '+e.message); }
+}
+async function testCharacters() {
+  hideError('settingsError'); const query=document.getElementById('s_character_query').value.trim()||'shiroko';
+  try { const r=await fetch('/api/test/characters',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query})}); const d=await r.json();
+    showError('settingsError', d.success?'✅ 角色查询成功!\n'+d.result:'❌ 角色查询失败:\n'+(d.error||'')); } catch(e){ showError('settingsError','请求失败: '+e.message); }
+}
+async function testResolve() {
+  hideError('settingsError'); const query=document.getElementById('s_character_query').value.trim()||'碧蓝档案的白子';
+  try { const r=await fetch('/api/test/resolve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query})}); const d=await r.json();
+    showError('settingsError', d.success?'=== 解析诊断 ===\n'+d.report:'❌ 解析失败:\n'+(d.error||'')); } catch(e){ showError('settingsError','请求失败: '+e.message); }
+}
+
+// ================= 初始化 =================
+loadSettings();
+loadWorkflowList();
+restoreChatLog();
+</script>
+</body>
+</html>

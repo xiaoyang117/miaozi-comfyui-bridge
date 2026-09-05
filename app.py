@@ -1,0 +1,569 @@
+"""喵梓二号 - ComfyUI 生图桥接 Web 应用（优化版）
+
+链路：用户输入/图片 -> (可选 VLM 识别) -> 角色搜索(本地库/浏览器)
+     -> LLM 生成提示词 -> 替换工作流占位符+设置尺寸 -> 提交 ComfyUI -> 返回图片
+
+优化点：
+- workflow_path 支持相对名(自动定位到 workflows/)与绝对路径
+- 对话框可随时选择分辨率预设，提交前自动改写 EmptyLatentImage
+- 更清晰的 SSE 事件与错误提示
+"""
+import json
+import os
+import threading
+from pathlib import Path
+
+import requests as _req
+from flask import (Flask, Response, jsonify, render_template, request,
+                   send_from_directory, stream_with_context)
+
+from character_lookup.query import is_built, lookup as char_lookup
+from character_lookup import resolver as char_resolver
+from comfyui.client import ComfyUIClient
+from llm.client import (LLMClient, PROMPT_SYSTEM_SPECIFIC,
+                        PROMPT_WITH_CONTEXT_SPECIFIC,
+                        SEARCH_SYSTEM, SEARCH_SYSTEM_TINY, EXTRACT_CN_SYSTEM)
+from settings import Settings
+
+BASE_DIR = Path(__file__).parent
+WORKFLOWS_DIR = BASE_DIR / "workflows"
+OUTPUTS_DIR = BASE_DIR / "outputs"
+
+settings = Settings()
+app = Flask(__name__, static_folder=str(BASE_DIR / "static"))
+app.config["TEMPLATES_AUTO_RELOAD"] = True
+app.secret_key = "comfyui-bridge-secret"
+
+# 单个应用实例内同时只允许一次生成，避免排队混乱
+_gen_lock = threading.Lock()
+
+
+# ====================================================================== #
+# 工厂
+# ====================================================================== #
+def make_llm(search_url_idx: int = 0) -> LLMClient:
+    sources = settings.search_sources
+    url = sources[search_url_idx]["url"] if 0 <= search_url_idx < len(sources) \
+        else sources[0]["url"]
+    return LLMClient(
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        model=settings.llm_model,
+        custom_system_prompt=settings.custom_system_prompt,
+        tavily_key=settings.tavily_key,
+        tavily_max_results=settings.tavily_max_results,
+        use_browser_search=settings.use_browser_search,
+        search_url=url,
+    )
+
+
+def make_comfy() -> ComfyUIClient:
+    return ComfyUIClient(server_url=settings.comfyui_url,
+                         output_dir=OUTPUTS_DIR)
+
+
+# ====================================================================== #
+# VLM 图片识别
+# ====================================================================== #
+def vlm_analyze(image_list: list) -> str:
+    """调用 VLM 逐张描述图片中的角色外貌。"""
+    if not image_list:
+        raise RuntimeError("没有图片数据")
+    base_url, api_key, model = (settings.vlm_base_url,
+                                settings.vlm_api_key, settings.vlm_model)
+    if not base_url or not model:
+        raise RuntimeError("VLM 未配置（请到『配置』页填写图片识别 API）")
+
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    if len(image_list) == 1:
+        prompt_text = "请详细描述这张图片中的角色外貌特征，包括发色、瞳色、体型、服装等。"
+    else:
+        prompt_text = ("请逐一描述每张图片中的角色外貌特征，按图片顺序标注"
+                       "（图片1、图片2...），包括发色、瞳色、体型、服装等。")
+    content_parts = [{"type": "text", "text": prompt_text}]
+    for img in image_list:
+        content_parts.append({"type": "image_url",
+                              "image_url": {"url": img}})
+
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": content_parts}],
+        "temperature": 0.1,
+    }
+    try:
+        resp = _req.post(url, headers=headers, json=body, timeout=60)
+    except _req.exceptions.ConnectionError:
+        raise RuntimeError(f"无法连接到 VLM ({base_url})")
+    except _req.exceptions.Timeout:
+        raise RuntimeError("VLM 请求超时")
+
+    if not resp.ok:
+        raise RuntimeError(f"VLM API 错误 (HTTP {resp.status_code}): "
+                           f"{resp.text[:300]}")
+    try:
+        data = resp.json()
+    except Exception:
+        raise RuntimeError(f"VLM 返回非 JSON:\n{resp.text[:300]}")
+
+    if "error" in data:
+        err = data["error"]
+        err = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+        raise RuntimeError(f"VLM 错误: {err}")
+
+    try:
+        return data["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError):
+        raise RuntimeError("VLM 返回格式异常")
+
+
+# ====================================================================== #
+# 工作流
+# ====================================================================== #
+def load_workflow(path: str = None) -> dict:
+    """加载工作流。path 可为绝对路径、相对 workflows 的文件名，或为空用默认。"""
+    path = path or settings.workflow_path
+    cand = Path(path)
+    if not cand.is_absolute():
+        cand = WORKFLOWS_DIR / cand.name
+    if not cand.exists():
+        raise FileNotFoundError(f"工作流文件不存在: {cand}")
+    return ComfyUIClient.load_workflow(str(cand))
+
+
+# ====================================================================== #
+# 角色候选格式化 / LLM 翻译兜底
+# ====================================================================== #
+def _fmt_candidates(cands: list) -> str:
+    """把候选角色 dict 列表格式化为 prompt 上下文文本。"""
+    lines = []
+    for i, d in enumerate(cands[:3], 1):
+        lines.append(f"[候选{i}] 角色: {d['character']} | 作品: {d['copyright']} "
+                     f"| 触发词: {d['trigger']}")
+        core = d.get("core_tags") or ""
+        tags = [t.strip() for t in core.split(",") if t.strip()]
+        if tags:
+            lines.append(f"   特征标签: {', '.join(tags[:60])}")
+    return "\n".join(lines)
+
+
+def _looks_like_tag(s: str) -> bool:
+    """判断字符串是否为纯 danbooru 标签样式（英文/数字/下划线/括号/逗号）。"""
+    import re as _re
+    return bool(_re.fullmatch(r"[A-Za-z0-9_\-(),.\s]+", s or ""))
+
+
+def _translate_and_lookup(cn_name: str, llm: LLMClient,
+                          history: list) -> list:
+    """把中文角色名翻译成 danbooru 标签并查库；成功则记住别名。"""
+    try:
+        retry = (f"角色中文名: {cn_name}\n"
+                 f"请给出这个角色的 danbooru 英文标签（罗马音），"
+                 f"只输出：角色标签名, 作品标签名。不知道作品就只输出角色名。")
+        q2 = llm._call("你是一个角色名翻译工具，只输出英文标签。", retry, history)
+        q2 = (q2 or "").strip()
+        if not q2:
+            return []
+        cands = char_resolver.resolve_from_text(q2)
+        if cands:
+            # 记住：下次遇到这个中文名直接命中
+            char_resolver.save_alias(cn_name, cands[0].get("character", ""))
+        return cands
+    except Exception as e:
+        print(f"[translate error] {e}")
+        return []
+
+
+# ====================================================================== #
+# 页面
+# ====================================================================== #
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+# ====================================================================== #
+# 配置 / 测试接口
+# ====================================================================== #
+@app.route("/api/settings", methods=["GET", "POST"])
+def api_settings():
+    if request.method == "GET":
+        return jsonify({"success": True, "settings": settings.get_all()})
+    data = request.get_json()
+    if not isinstance(data, dict):
+        return jsonify({"error": "无效的配置数据"}), 400
+    settings.update(data)
+    return jsonify({"success": True, "settings": settings.get_all()})
+
+
+@app.route("/api/workflows")
+def api_workflows():
+    items = []
+    if WORKFLOWS_DIR.exists():
+        for f in sorted(WORKFLOWS_DIR.glob("*.json")):
+            items.append({"path": str(f), "name": f.name})
+    return jsonify({"success": True, "workflows": items})
+
+
+@app.route("/api/test/llm", methods=["POST"])
+def test_llm():
+    data = request.get_json() or {}
+    try:
+        llm = LLMClient(
+            base_url=data.get("llm_base_url") or settings.llm_base_url,
+            api_key=data.get("llm_api_key") or settings.llm_api_key,
+            model=data.get("llm_model") or settings.llm_model,
+            custom_system_prompt=(data.get("custom_system_prompt")
+                                  or settings.custom_system_prompt))
+        result, _ = llm.generate_prompt("a cat sitting on a windowsill",
+                                        use_search=False)
+        return jsonify({"success": True, "prompt": result})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/api/test/llm/raw", methods=["POST"])
+def test_llm_raw():
+    data = request.get_json() or {}
+    base_url = (data.get("llm_base_url") or settings.llm_base_url).rstrip("/")
+    api_key = data.get("llm_api_key") or settings.llm_api_key
+    model = data.get("llm_model") or settings.llm_model
+    body = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "Reply with: test ok"},
+            {"role": "user", "content": "ping"},
+        ],
+        "temperature": 0.1,
+    }
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        resp = _req.post(f"{base_url}/chat/completions", headers=headers,
+                         json=body, timeout=30)
+        return jsonify({"success": resp.ok, "status": resp.status_code,
+                        "body": resp.text[:2000]})
+    except Exception as e:
+        return jsonify({"success": False, "status": 0,
+                        "body": f"请求失败: {e}"})
+
+
+@app.route("/api/test/search", methods=["POST"])
+def test_search():
+    data = request.get_json() or {}
+    tavily_key = data.get("tavily_key") or settings.tavily_key
+    if not tavily_key:
+        return jsonify({"success": False, "error": "未配置 Tavily Key"})
+    try:
+        from llm.search import tavily_search
+        results = tavily_search(tavily_key, "test", max_results=2)
+        if results:
+            return jsonify({"success": True, "results": results[:500]})
+        return jsonify({"success": False,
+                        "error": "搜索无结果或 Key 无效"})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/api/test/comfyui", methods=["POST"])
+def test_comfyui():
+    data = request.get_json() or {}
+    url = data.get("comfyui_url") or settings.comfyui_url
+    try:
+        client = ComfyUIClient(server_url=url)
+        if client.test_connection() == "ok":
+            return jsonify({"success": True})
+        return jsonify({"success": False, "error": client.test_connection()})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/api/test/characters", methods=["POST"])
+def test_characters():
+    data = request.get_json() or {}
+    try:
+        if not is_built():
+            return jsonify({
+                "success": False,
+                "error": "本地角色库未建立，请先运行 "
+                         "python character_lookup/build_db.py 构建数据库"})
+        q = (data.get("query") or "shiroko").strip()
+        # 1) 直接单名查询（兼容旧接口）
+        result = char_lookup(q)
+        # 2) 走智能解析：英文直查/中文别名/多候选
+        cands = char_resolver.resolve_from_text(q)
+        if cands:
+            text = char_resolver.role_candidates_text(q)
+            return jsonify({"success": True,
+                            "result": (result[:300] if result else text[:300]),
+                            "candidates": [c["character"] for c in cands[:5]]})
+        return jsonify({
+            "success": False,
+            "error": "未找到该角色。可尝试：\n"
+                     "1. 英文/罗马音：shiroko\n"
+                     "2. 中文名（内置常见角色）：白子\n"
+                     "3. 中文名+系列：碧蓝档案的白子"})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/api/test/resolve", methods=["POST"])
+def test_resolve():
+    """诊断接口：返回智能解析器每一步的结果，便于排查角色识别问题。"""
+    data = request.get_json() or {}
+    q = (data.get("query") or "").strip()
+    if not q:
+        return jsonify({"success": False, "error": "请输入查询内容"})
+    try:
+        report = char_resolver.debug_report(q)
+        return jsonify({"success": True, "report": report})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+# ====================================================================== #
+# 生成主流程（SSE）
+# ====================================================================== #
+@app.route("/api/generate", methods=["POST"])
+def generate():
+    if not _gen_lock.acquire(blocking=False):
+        return jsonify({"queue": True}), 200
+
+    def event_stream():
+        try:
+            data = request.get_json() or {}
+            user_input = (data.get("prompt") or "").strip()
+            print(f"[input] {user_input[:80]}")
+            if not user_input:
+                yield _sse({"step": "error", "error": "请输入图片描述"})
+                return
+
+            # ---------- 解析参数 ----------
+            wf_path = data.get("workflow_path") or settings.workflow_path
+            use_search = bool(data.get("use_search", True))
+            history = data.get("history") or []
+            search_url_idx = int(data.get("search_url_idx") or 0)
+            width = data.get("width") or settings.gen_width
+            height = data.get("height") or settings.gen_height
+
+            # ---------- 加载工作流 ----------
+            try:
+                wf = load_workflow(wf_path)
+            except FileNotFoundError as e:
+                yield _sse({"step": "error", "error": str(e)})
+                return
+            except Exception as e:
+                yield _sse({"step": "error", "error": f"工作流解析失败: {e}"})
+                return
+
+            llm = make_llm(search_url_idx=search_url_idx)
+            comfy = make_comfy()
+
+            # ---------- Step 0: VLM ----------
+            image_list = data.get("image") or []
+            if isinstance(image_list, str):
+                image_list = [image_list] if image_list else []
+            vlm_description = None
+            if image_list:
+                yield _sse({"step": "vlm"})
+                try:
+                    vlm_description = vlm_analyze(image_list)
+                except RuntimeError as e:
+                    yield _sse({"step": "error",
+                                "error": f"图片识别失败: {e}"})
+                    return
+                user_input = (f"用户上传了一张图片，以下是图片识别结果：\n"
+                              f"{vlm_description}\n\n用户需求：{user_input}")
+
+            # ---------- Step 1: 角色识别（规则优先，LLM 兜底） ----------
+            search_info = None
+            raw = None
+            role_hint = (data.get("role") or "").strip()
+            if use_search:
+                yield _sse({"step": "search"})
+                cands: list = []
+                via = ""
+                role_missed = False
+                try:
+                    # (0) 手动指定角色（最高优先级，完全绕过识别）
+                    if role_hint:
+                        cands = char_resolver.resolve_from_text(role_hint,
+                                                                strict=True)
+                        if cands:
+                            via = "手动指定"
+                            # 用户明确给的中文称呼 -> 记住别名
+                            char_resolver.learn(role_hint, cands[0], via)
+                        else:
+                            role_missed = True
+                            # 若输入是自由文本（非纯标签样式），允许结合描述再查一次
+                            if not _looks_like_tag(role_hint):
+                                cands = char_resolver.resolve_from_text(
+                                    f"{role_hint} {user_input}")
+                                via = "手动指定(结合描述)"
+                    # (1) 规则层：英文直查 / 中文别名表 / 多候选 —— 无需 LLM
+                    if not cands:
+                        cands = char_resolver.resolve_from_text(user_input)
+                        if cands:
+                            via = "本地库直查(无LLM)"
+
+                    # (2) LLM 兜底层：仅当规则层没命中时才调用
+                    if not cands:
+                        # 先让 LLM 给英文标签（提示词已对小模型简化）
+                        q = ""
+                        try:
+                            q = llm._call(SEARCH_SYSTEM_TINY, user_input, [])
+                        except Exception as e:
+                            print(f"[llm-extract error] {e}")
+                        if q:
+                            cands = char_resolver.resolve_from_text(q)
+                            via = "LLM英文标签"
+                        # 若仍未命中：抽取中文角色名，走别名/翻译
+                        if not cands:
+                            cn = ""
+                            try:
+                                cn = llm._call(EXTRACT_CN_SYSTEM,
+                                               user_input, []) or ""
+                            except Exception as e:
+                                print(f"[llm-cn error] {e}")
+                            cn = cn.strip()
+                            if cn and cn != "未知":
+                                cands = char_resolver.resolve_from_text(cn)
+                                via = "中文名→别名"
+                            if not cands and cn and cn != "未知":
+                                cands = _translate_and_lookup(cn, llm, history)
+                                via = "LLM翻译"
+                        # 浏览器搜索辅助（可选，给 LLM 提供线索）
+                        if not cands and settings.use_browser_search \
+                                and llm.search_url:
+                            try:
+                                from llm.browser_search import browser_search
+                                web_raw = browser_search(user_input, 5,
+                                                         llm.search_url)
+                                if web_raw:
+                                    q2 = llm._call(SEARCH_SYSTEM,
+                                                   f"用户需求: {user_input}"
+                                                   f"\n网络搜索:\n{web_raw[:800]}",
+                                                   history)
+                                    cands = char_resolver.resolve_from_text(q2)
+                                    via = "浏览器搜索"
+                            except Exception as e:
+                                print(f"[web search error] {e}")
+
+                    # (3) 组装结果
+                    if cands:
+                        raw = _fmt_candidates(cands)
+                        best = cands[0]
+                        search_info = {
+                            "query": best.get("character", ""),
+                            "via": via,
+                            "role_missed": role_missed,
+                            "candidates": [c.get("character", "")
+                                           for c in cands[:5]],
+                            "results": (raw or "")[:800],
+                        }
+                        # 仅当用户显式给出中文角色（role框/描述直名）时学习别名，
+                        # 避免把 LLM 猜错的结果或整句描述写进别名表。
+                        # 学习统一由 _translate_and_lookup 以精确中文名触发。
+                    else:
+                        print(f"[search] 未找到角色: {user_input[:60]}")
+                        search_info = {"query": "", "via": via,
+                                       "results": "",
+                                       "error": "未找到匹配角色，已按无角色参考继续"}
+                except Exception as e:
+                    print(f"[search error] {e}")
+                    search_info = {"query": "", "results": "",
+                                   "error": str(e)}
+
+            # ---------- Step 2: LLM 生成提示词 ----------
+            yield _sse({"step": "llm"})
+            prompt = ""
+            try:
+                if search_info and raw:
+                    ctx = f"角色参考资料:\n{raw}\n\n用户需求: {user_input}"
+                    prompt = llm._call(PROMPT_WITH_CONTEXT_SPECIFIC, ctx, history)
+                else:
+                    sp = PROMPT_SYSTEM_SPECIFIC if use_search \
+                        else llm._prompt_system
+                    prompt = llm._call(sp, user_input, history)
+                if not prompt:
+                    raise RuntimeError("LLM 返回了空提示词")
+            except Exception as e:
+                yield _sse({"step": "error",
+                            "error": f"提示词生成失败: {e}"})
+                return
+
+            # ---------- Step 3: ComfyUI ----------
+            yield _sse({"step": "comfyui"})
+            try:
+                path = comfy.generate(
+                    wf, prompt,
+                    placeholder=settings.prompt_placeholder,
+                    save_node_id=settings.save_node_id,
+                    width=int(width) if width else None,
+                    height=int(height) if height else None,
+                    width_placeholder=settings.width_placeholder,
+                    height_placeholder=settings.height_placeholder,
+                )
+            except Exception as e:
+                yield _sse({"step": "error",
+                            "error": f"ComfyUI 生图失败: {e}"})
+                return
+
+            if path and path.exists():
+                yield _sse({
+                    "step": "done",
+                    "image": f"/outputs/{path.name}",
+                    "prompt": prompt,
+                    "search": search_info,
+                    "vlm": vlm_description,
+                })
+            else:
+                yield _sse({"step": "error",
+                            "error": "生图失败，ComfyUI 未返回图片"})
+        except Exception as e:
+            yield _sse({"step": "error", "error": str(e)})
+        finally:
+            _gen_lock.release()
+
+    return Response(stream_with_context(event_stream()),
+                    mimetype="text/event-stream")
+
+
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+# ====================================================================== #
+# 静态输出
+# ====================================================================== #
+@app.route("/outputs/<path:filename>")
+def serve_output(filename):
+    return send_from_directory(str(OUTPUTS_DIR), filename)
+
+
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({"error": "接口不存在"}), 404
+
+
+@app.errorhandler(Exception)
+def handle_all_errors(e):
+    return jsonify({"error": f"服务器错误: {e}"}), 500
+
+
+if __name__ == "__main__":
+    import os as _os
+    import waitress
+    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    host = _os.getenv("HOST", "0.0.0.0")
+    port = int(_os.getenv("PORT", "5000"))
+    print("=" * 46)
+    print("  喵梓二号 已启动")
+    print(f"  本机访问:  http://127.0.0.1:{port}")
+    print(f"  局域网:    http://<your-ip>:{port}")
+    print("=" * 46)
+    waitress.serve(app, host=host, port=port, threads=8)

@@ -1,0 +1,70 @@
+{
+  "llm_base_url": "http://127.0.0.1:8080/v1",
+  "llm_api_key": "",
+  "llm_model": "qwen2.5:7b",
+  "custom_system_prompt": "你是一位ai绘图高手，根据要求写出完美提示词并生成图片。\n格式要求：\n- 尽量使用标签格式，也可以自然语言\n- 使用英文逗号（,） 分隔\n- 角色名、系列名首字母大写\n- 普通标签全部小写\n- 权重使用 (关键词:权重值) 语法，权重 > 1.0 才生效\n- 逗号后必须加空格\n- 全程英文",
+  "vlm_base_url": "",
+  "vlm_api_key": "",
+  "vlm_model": "",
+  "comfyui_url": "http://127.0.0.1:8188",
+  "workflow_path": "default_workflow.json",
+  "prompt_placeholder": "114514.1919810",
+  "save_node_id": "9",
+  "width_placeholder": "chang",
+  "height_placeholder": "gao",
+  "gen_width": 896,
+  "gen_height": 1152,
+  "resolution_presets": [
+    {
+      "label": "896×1152",
+      "width": 896,
+      "height": 1152
+    },
+    {
+      "label": "1152×896",
+      "width": 1152,
+      "height": 896
+    },
+    {
+      "label": "832×1216",
+      "width": 832,
+      "height": 1216
+    },
+    {
+      "label": "1216×832",
+      "width": 1216,
+      "height": 832
+    },
+    {
+      "label": "1024×1024",
+      "width": 1024,
+      "height": 1024
+    }
+  ],
+  "prompt_instructions": "",
+  "tavily_key": "",
+  "tavily_max_results": 5,
+  "use_browser_search": false,
+  "search_sources": [
+    {
+      "name": "Bing",
+      "url": "https://www.bing.com/search?q={query}&count={count}"
+    },
+    {
+      "name": "AniFun",
+      "url": "https://anifun.cn/search?keywords={query}"
+    },
+    {
+      "name": "碧蓝航线",
+      "url": "https://wiki.biligame.com/blhx/index.php?search={query}"
+    },
+    {
+      "name": "碧蓝档案",
+      "url": "https://wiki.biligame.com/ba/index.php?search={query}"
+    }
+  ],
+  "proxy_url": "http://127.0.0.1:7897",
+  "danbooru_api_key": "",
+  "danbooru_username": "",
+  "history_rounds": 2
+}

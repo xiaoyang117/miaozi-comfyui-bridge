@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.env
+outputs/
+*.egg-info/
+.venv/
+venv/
+settings.json
+cert.pem
+key.pem
+
+# 本地角色库与源数据（体积超 GitHub 单文件限制，克隆后自行重建）
+character_lookup/characters.db
+character_lookup/danbooru_character.csv
