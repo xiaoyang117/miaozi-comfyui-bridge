@@ -7,8 +7,6 @@ from logger import get_logger as _get_logger
 
 logger = _get_logger("llm")
 
-from .search import tavily_search
-
 PROMPT_SYSTEM = (
     "You are a prompt generator. "
     "Output ONLY the prompt. No greetings, no notes, no labels, no markdown, no JSON, no quotes. "
@@ -16,22 +14,6 @@ PROMPT_SYSTEM = (
     "Just the prompt text, nothing before, nothing after. "
     "Include subject, style, lighting, composition, quality keywords. "
     "Character features: hair color, eye color, body type."
-)
-
-SEARCH_SYSTEM = (
-    "任务：找出动漫角色的英文名（罗马音）和作品名。\n"
-    "输入可能是中文描述或网络搜索结果。\n"
-    "规则：\n"
-    "1. 角色名转英文/罗马音，如 白子 -> shiroko\n"
-    "2. 作品名用 danbooru 标签风格，如 碧蓝档案 -> blue_archive\n"
-    "3. 只输出：角色名, 作品名\n"
-    "4. 不知道作品名就只输出角色名\n"
-    "5. 不要输出中文、不要解释、不要引号、不要多余字\n"
-    "例子：\n"
-    "输入：碧蓝档案里的白子\n"
-    "输出：shiroko, blue_archive\n"
-    "输入：hoshino swimming\n"
-    "输出：hoshino, blue_archive\n"
 )
 
 # 小模型专用：更短、示例更少、只要求一个名字
@@ -69,14 +51,6 @@ _IMG_REF = re.compile(
 _IMG_CLEAN = re.compile(r'\bimage\.(?:png|jpg|jpeg|gif|webp|bmp|svg)\b', re.IGNORECASE)
 _REPLACE_IMG = re.compile(r'\[img\]', re.IGNORECASE)
 
-PROMPT_WITH_CONTEXT = (
-    "You are a prompt generator. "
-    "Below is reference info about a character's appearance from web search. "
-    "Character features: hair color, eye color, body type. "
-    "Output ONLY the prompt. No greetings, no notes, no labels, no markdown, no JSON, no quotes. "
-    "Do NOT include phrases like 'Here is', 'I created', 'Prompt:', or any explanation."
-)
-
 PROMPT_SYSTEM_SPECIFIC = (
     "You are a prompt generator. "
     "Must include: character full name, source/work name, "
@@ -99,13 +73,10 @@ PROMPT_WITH_CONTEXT_SPECIFIC = (
 
 class LLMClient:
     def __init__(self, base_url: str = "", api_key: str = "", model: str = "",
-                 custom_system_prompt: str = "",
-                 tavily_key: str = "", tavily_max_results: int = 5):
+                 custom_system_prompt: str = ""):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
-        self.tavily_key = tavily_key
-        self.tavily_max_results = tavily_max_results
         self._prompt_system = custom_system_prompt.strip() or PROMPT_SYSTEM
 
     def _call(self, system: str, user: str, history: list = None) -> str:
@@ -199,30 +170,3 @@ class LLMClient:
             raise RuntimeError(
                 f"LLM API 返回格式异常:\n{json.dumps(data, ensure_ascii=False)[:500]}"
             )
-
-    def generate_prompt(self, user_input: str, use_search: bool = True,
-                        history: list = None,
-                        specific_character: bool = False) -> tuple:
-        search_info = None
-        if use_search:
-            try:
-                query = self._call(SEARCH_SYSTEM, user_input, history)
-                if not query:
-                    raise ValueError("empty query")
-                if self.tavily_key:
-                    raw = tavily_search(self.tavily_key, query, self.tavily_max_results)
-                else:
-                    raw = None
-                clean_raw = _IMG_REF.sub('', raw or "").replace('[img]', '')
-                search_info = {"query": query, "results": clean_raw[:800]}
-                if raw:
-                    ctx = f"角色参考资料:\n{clean_raw}\n\n用户需求: {user_input}"
-                    pw = PROMPT_WITH_CONTEXT_SPECIFIC if specific_character else PROMPT_WITH_CONTEXT
-                    prompt = self._call(pw, ctx, history)
-                    return prompt, search_info
-            except Exception as e:
-                logger.warning("search error: %s", e)
-
-        system_prompt = PROMPT_SYSTEM_SPECIFIC if specific_character else self._prompt_system
-        prompt = self._call(system_prompt, user_input, history)
-        return prompt, search_info

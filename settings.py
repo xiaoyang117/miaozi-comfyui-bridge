@@ -49,13 +49,11 @@ DEFAULT_SETTINGS = {
     # ---- 提示词生成附加指令 ----
     "prompt_instructions": "",
 
-    # ---- 搜索 ----
-    "tavily_key": "",
-    "tavily_max_results": 5,
+    # ---- 搜索（legacy，主流程已本地化，保留键位兼容旧 settings.json）----
     "search_sources": [
         {"name": "Bing", "url": "https://www.bing.com/search?q={query}&count={count}"}
     ],
-    # 浏览器搜索代理
+    # 网络代理（角色库在线重建/下载用）
     "proxy_url": "http://127.0.0.1:7897",
     "danbooru_api_key": "",
     "danbooru_username": "",
@@ -192,14 +190,6 @@ class Settings:
     @property
     def prompt_instructions(self) -> str:
         return str(self._data.get("prompt_instructions", ""))
-
-    @property
-    def tavily_key(self) -> str:
-        return str(self._data.get("tavily_key", ""))
-
-    @property
-    def tavily_max_results(self) -> int:
-        return _to_int(self._data.get("tavily_max_results", 5), 5)
 
     @property
     def proxy_url(self) -> str:

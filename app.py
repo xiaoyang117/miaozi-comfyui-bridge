@@ -24,7 +24,7 @@ from character_lookup import resolver as char_resolver
 from comfyui.client import ComfyUIClient
 from llm.client import (LLMClient, PROMPT_SYSTEM_SPECIFIC,
                         PROMPT_WITH_CONTEXT_SPECIFIC,
-                        SEARCH_SYSTEM, SEARCH_SYSTEM_TINY, EXTRACT_CN_SYSTEM,
+                        SEARCH_SYSTEM_TINY, EXTRACT_CN_SYSTEM,
                         SIZE_DECIDE_SYSTEM)
 from settings import Settings
 from logger import get_logger, get_request_id, set_request_id
@@ -134,8 +134,6 @@ def make_llm() -> LLMClient:
         api_key=settings.llm_api_key,
         model=settings.llm_model,
         custom_system_prompt=settings.custom_system_prompt,
-        tavily_key=settings.tavily_key,
-        tavily_max_results=settings.tavily_max_results,
     )
 
 
@@ -438,8 +436,8 @@ def test_llm():
             model=data.get("llm_model") or settings.llm_model,
             custom_system_prompt=(data.get("custom_system_prompt")
                                   or settings.custom_system_prompt))
-        result, _ = llm.generate_prompt("a cat sitting on a windowsill",
-                                        use_search=False)
+        result = llm._call(llm._prompt_system,
+                           "a cat sitting on a windowsill", [])
         return jsonify({"success": True, "prompt": result})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
@@ -470,23 +468,6 @@ def test_llm_raw():
     except Exception as e:
         return jsonify({"success": False, "status": 0,
                         "body": f"请求失败: {e}"})
-
-
-@app.route("/api/test/search", methods=["POST"])
-def test_search():
-    data = request.get_json() or {}
-    tavily_key = data.get("tavily_key") or settings.tavily_key
-    if not tavily_key:
-        return jsonify({"success": False, "error": "未配置 Tavily Key"})
-    try:
-        from llm.search import tavily_search
-        results = tavily_search(tavily_key, "test", max_results=2)
-        if results:
-            return jsonify({"success": True, "results": results[:500]})
-        return jsonify({"success": False,
-                        "error": "搜索无结果或 Key 无效"})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
 
 
 @app.route("/api/test/comfyui", methods=["POST"])
