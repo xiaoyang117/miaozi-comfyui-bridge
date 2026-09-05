@@ -15,6 +15,7 @@
     <nav class="tabs">
       <button class="tab active" data-tab="chat" onclick="switchTab('chat')">对话</button>
       <button class="tab" data-tab="settings" onclick="switchTab('settings')">配置</button>
+      <button class="tab" data-tab="logs" onclick="switchTab('logs');loadLogs()">📜 日志</button>
     </nav>
   </div>
 
@@ -205,6 +206,26 @@
       <pre id="settingsErrorText" class="error-content"></pre>
       <button class="error-dismiss" onclick="hideError('settingsError')">✕</button>
     </div>
+  </div>
+
+  <!-- ================= 日志面板 ================= -->
+  <div id="panel-logs" class="panel">
+    <div class="log-toolbar">
+      <div style="display:flex;gap:8px;align-items:center;flex:1">
+        <button class="btn-secondary" onclick="loadLogs()">↻ 刷新</button>
+        <label class="toggle-label" style="font-size:.8rem">
+          <input type="checkbox" id="logAutoRefresh" checked>
+          <span class="toggle-slider"></span>自动刷新
+        </label>
+        <span id="logMeta" style="font-size:.74rem;color:var(--text-faint)"></span>
+      </div>
+      <button class="btn-secondary btn-danger" onclick="copyLogs()">📋 复制</button>
+    </div>
+    <div id="logBox" class="log-box"></div>
+    <p class="field-hint" style="padding:6px 2px">
+      日志自动写入项目根目录 <code>logs/app.log</code>（按 5MB 轮转，保留 5 份）。
+      前端 JS 错误也会自动上报到这里。排查 Bug 时可把日志复制给开发者。
+    </p>
   </div>
 </div>
 
@@ -895,6 +916,69 @@ async function testResolve() {
   try { const r=await fetch('/api/test/resolve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query})}); const d=await r.json();
     showError('settingsError', d.success?'=== 解析诊断 ===\n'+d.report:'❌ 解析失败:\n'+(d.error||'')); } catch(e){ showError('settingsError','请求失败: '+e.message); }
 }
+
+// ================= 日志查看 =================
+let logTimer = null;
+async function loadLogs() {
+  try {
+    const lines = 400;
+    const r = await fetch('/api/logs?lines=' + lines);
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || '加载失败');
+    const box = document.getElementById('logBox');
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+    box.textContent = d.log || '(日志为空)';
+    const meta = document.getElementById('logMeta');
+    meta.textContent = `共 ${d.total||0} 行 · 显示最近 ${d.lines||0} 行` + (d.file ? ' · ' + d.file : '');
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  } catch(e) { console.warn('log load error', e); }
+}
+function copyLogs() {
+  const box = document.getElementById('logBox');
+  if (!box.textContent.trim()) { showModal('日志为空', 'error'); return; }
+  navigator.clipboard.writeText(box.textContent).then(() => {
+    showModal('日志已复制 ✅', 'success');
+  }).catch(() => showModal('复制失败，请手动选择复制', 'error'));
+}
+function startLogAutoRefresh() {
+  if (logTimer) clearInterval(logTimer);
+  const cb = document.getElementById('logAutoRefresh');
+  if (cb && cb.checked) logTimer = setInterval(() => {
+    if (document.getElementById('panel-logs').classList.contains('active')) loadLogs();
+  }, 3000);
+}
+document.addEventListener('DOMContentLoaded', function() {
+  document.getElementById('logAutoRefresh').addEventListener('change', startLogAutoRefresh);
+  startLogAutoRefresh();
+});
+
+// ================= 前端错误自动上报 =================
+function reportFrontendError(msg, source, lineno, colno, error) {
+  try {
+    const payload = {
+      message: String(msg || '').slice(0, 500),
+      source: (source || '') + (lineno ? ':' + lineno : ''),
+      location: error && error.stack ? String(error.stack).slice(0, 1000) : '',
+    };
+    if (!payload.message && !payload.location) return;
+    // 防抖：1 秒内最多报 3 条，避免错误风暴
+    const now = Date.now();
+    const last = (reportFrontendError._last || 0);
+    if (now - last < 300) return;
+    reportFrontendError._last = now;
+    fetch('/api/logs/frontend', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    }).catch(() => {});
+  } catch(e) { /* 忽略上报自身错误 */ }
+}
+window.addEventListener('error', function(e) {
+  reportFrontendError(e.message, e.filename, e.lineno, e.colno, e.error);
+});
+window.addEventListener('unhandledrejection', function(e) {
+  const err = e.reason;
+  reportFrontendError(err && err.message ? err.message : String(err), '', 0, 0, err);
+});
 
 // ================= 初始化 =================
 loadSettings();

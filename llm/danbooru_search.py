@@ -2,6 +2,10 @@ import json
 import time
 from curl_cffi import requests
 
+from logger import get_logger
+
+log = get_logger("danbooru")
+
 _DANBOORU_URL = "https://danbooru.donmai.us/posts.json"
 _LAST_CALL = 0
 
@@ -62,17 +66,20 @@ def danbooru_search(query: str, max_posts: int = 3,
             return None
 
     posts = _do_search(char_tag)
-    print(f"[danbooru] step1 '{char_tag}': {len(posts) if isinstance(posts, list) else posts}")
+    log.debug("step1 '%s': %s", char_tag,
+              len(posts) if isinstance(posts, list) else posts)
     if not posts and len(parts) >= 2:
         series_tag = parts[1].replace(" ", "_")
         compound = f"{char_tag}_({series_tag})"
         posts = _do_search(compound)
-        print(f"[danbooru] step2 '{compound}': {len(posts) if isinstance(posts, list) else posts}")
+        log.debug("step2 '%s': %s", compound,
+                  len(posts) if isinstance(posts, list) else posts)
     if not posts and len(parts) >= 2:
         series_tag = parts[1].replace(" ", "_")
         compound = f"{char_tag}_({series_tag}) {series_tag}"
         posts = _do_search(compound)
-        print(f"[danbooru] step3 '{compound}': {len(posts) if isinstance(posts, list) else posts}")
+        log.debug("step3 '%s': %s", compound,
+                  len(posts) if isinstance(posts, list) else posts)
 
     if posts is None:
         return "[Danbooru: API 请求失败]"

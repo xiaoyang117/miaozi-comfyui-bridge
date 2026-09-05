@@ -3,6 +3,10 @@ import re
 
 import requests
 
+from logger import get_logger as _get_logger
+
+logger = _get_logger("llm")
+
 from .search import tavily_search
 from .browser_search import browser_search
 
@@ -224,7 +228,7 @@ class LLMClient:
                     prompt = self._call(pw, ctx, history)
                     return prompt, search_info
             except Exception as e:
-                print(f"[search error] {e}")
+                logger.warning("search error: %s", e)
 
         system_prompt = PROMPT_SYSTEM_SPECIFIC if specific_character else self._prompt_system
         prompt = self._call(system_prompt, user_input, history)

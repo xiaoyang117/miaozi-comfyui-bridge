@@ -87,6 +87,20 @@ body {
 .panel { display: none; }
 .panel.active { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 #panel-settings { overflow-y: auto; padding: 4px 2px 20px; gap: 0; }
+#panel-logs { overflow-y: auto; padding: 4px 2px 20px; gap: 0; }
+.log-toolbar {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+  background: var(--bg-elev); border: 1px solid var(--border-soft);
+  border-radius: var(--radius); padding: 8px 12px; flex-wrap: wrap;
+}
+.log-box {
+  background: var(--bg-elev-2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 12px 14px;
+  font-family: Consolas, Menlo, "Courier New", monospace;
+  font-size: .76rem; line-height: 1.55; color: var(--text-dim);
+  white-space: pre-wrap; word-break: break-all;
+  min-height: 300px; max-height: 62vh; overflow-y: auto;
+}
 
 /* ============ Chat 面板 ============ */
 #panel-chat.active { padding-bottom: 0; }

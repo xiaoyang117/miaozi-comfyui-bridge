@@ -12,6 +12,10 @@ from typing import Optional
 
 import requests
 
+from logger import get_logger
+
+log = get_logger("comfyui")
+
 # 尺寸相关的 ComfyUI 节点类型（它们的 inputs 里是整数宽高，非字符串）
 _LATENT_CLASSES = {"EmptyLatentImage", "EmptySD3LatentImage", "EmptyFluxLatentImage"}
 # 尺寸节点在 inputs 中的字段名
@@ -132,6 +136,7 @@ class ComfyUIClient:
             if isinstance(err, dict) and err.get("node_errors"):
                 detail = "\n节点错误:\n" + json.dumps(
                     err["node_errors"], ensure_ascii=False, indent=2)[:1500]
+                log.error("ComfyUI 提交失败，节点错误详情: %s", detail)
             raise RuntimeError(f"ComfyUI 提交工作流失败: {msg}{detail}")
 
         resp.raise_for_status()
@@ -184,6 +189,8 @@ class ComfyUIClient:
                     err_msg = msg_data.get("message", str(msg_data))
                     nid = msg_data.get("node_id", "?")
                     ntype = msg_data.get("node_type", "?")
+                    log.error("ComfyUI 节点 #%s (%s) 执行错误: %s",
+                              nid, ntype, err_msg)
                     raise RuntimeError(
                         f"ComfyUI 节点 #{nid} ({ntype}) 执行错误:\n{err_msg}")
 
@@ -192,6 +199,8 @@ class ComfyUIClient:
                 return path
             # 若已执行完成但没匹配到图，退化为遍历所有输出
             if status.get("completed") or status.get("status_str") == "success":
+                log.warning("ComfyUI 任务已完成但 save_node_id=%s 无图，"
+                            "尝试遍历全部输出", save_node_id)
                 path = self._download_images(entry, save_node_id, fallback=True)
                 if path:
                     return path
@@ -200,6 +209,7 @@ class ComfyUIClient:
                     "ComfyUI 任务已完成但未返回图片，请检查 save_node_id 是否与"
                     "工作流中的 SaveImage 节点一致")
 
+        log.error("ComfyUI 生图超时（%s 秒），prompt_id=%s", timeout, prompt_id)
         raise RuntimeError(f"ComfyUI 生图超时（{timeout} 秒），请检查工作流节点配置")
 
     def _download_images(self, entry: dict, save_node_id: str,

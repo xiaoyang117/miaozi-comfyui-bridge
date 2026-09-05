@@ -25,10 +25,13 @@ from llm.client import (LLMClient, PROMPT_SYSTEM_SPECIFIC,
                         SEARCH_SYSTEM, SEARCH_SYSTEM_TINY, EXTRACT_CN_SYSTEM,
                         SIZE_DECIDE_SYSTEM)
 from settings import Settings
+from logger import get_logger, get_request_id, set_request_id
 
 BASE_DIR = Path(__file__).parent
 WORKFLOWS_DIR = BASE_DIR / "workflows"
 OUTPUTS_DIR = BASE_DIR / "outputs"
+
+log = get_logger("app")
 
 settings = Settings()
 app = Flask(__name__, static_folder=str(BASE_DIR / "static"))
@@ -37,6 +40,18 @@ app.secret_key = "comfyui-bridge-secret"
 
 # 单个应用实例内同时只允许一次生成，避免排队混乱
 _gen_lock = threading.Lock()
+
+
+@app.before_request
+def _log_request():
+    """每个 HTTP 请求打一条日志；SSE 生成请求会给线程设 request_id。"""
+    rid = request.headers.get("X-Request-Id", "")
+    set_request_id(rid)
+    path = request.path
+    if path.startswith("/outputs/"):
+        log.debug("GET %s", path)
+    else:
+        log.info("→ %s %s", request.method, path)
 
 
 # ====================================================================== #
@@ -174,7 +189,7 @@ def _translate_and_lookup(cn_name: str, llm: LLMClient,
             char_resolver.save_alias(cn_name, cands[0].get("character", ""))
         return cands
     except Exception as e:
-        print(f"[translate error] {e}")
+        log.error("[translate error] %s", e)
         return []
 
 
@@ -306,7 +321,7 @@ def decide_resolution(user_input: str, llm: LLMClient,
             w, h = _pick_size_for_direction("square")
             return w, h, "llm:square"
     except Exception as e:
-        print(f"[size-decide error] {e}")
+        log.error("[size-decide error] %s", e)
 
     # 4) 全部失败 → 默认
     w, h = settings.gen_width, settings.gen_height
@@ -473,10 +488,13 @@ def generate():
         return jsonify({"queue": True}), 200
 
     def event_stream():
+        import uuid as _uuid
+        set_request_id(_uuid.uuid4().hex[:12])  # 本次生成全程共享此 id
+        gid = get_request_id()
         try:
             data = request.get_json() or {}
             user_input = (data.get("prompt") or "").strip()
-            print(f"[input] {user_input[:80]}")
+            log.info("[%s] input: %s", gid, user_input[:100])
             if not user_input:
                 yield _sse({"step": "error", "error": "请输入图片描述"})
                 return
@@ -490,14 +508,22 @@ def generate():
             width = data.get("width") or settings.gen_width
             height = data.get("height") or settings.gen_height
             size_via = "manual"
+            log.info("[%s] params: wf=%s search=%s auto_size=%s size=%sx%s",
+                     gid, Path(wf_path).name, use_search, auto_resolution,
+                     width, height)
 
             # ---------- 加载工作流 ----------
             try:
                 wf = load_workflow(wf_path)
+                log.info("[%s] workflow loaded: %s 节点数=%s", gid,
+                         Path(wf_path).name, len(wf))
             except FileNotFoundError as e:
+                log.error("[%s] workflow not found: %s", gid, e)
                 yield _sse({"step": "error", "error": str(e)})
                 return
             except Exception as e:
+                log.error("[%s] workflow parse error: %s", gid, e,
+                          exc_info=True)
                 yield _sse({"step": "error", "error": f"工作流解析失败: {e}"})
                 return
 
@@ -511,9 +537,13 @@ def generate():
             vlm_description = None
             if image_list:
                 yield _sse({"step": "vlm"})
+                log.info("[%s] vlm: %d 张图", gid, len(image_list))
                 try:
                     vlm_description = vlm_analyze(image_list)
+                    log.info("[%s] vlm done: %s 字", gid,
+                             len(vlm_description or ""))
                 except RuntimeError as e:
+                    log.error("[%s] vlm failed: %s", gid, e)
                     yield _sse({"step": "error",
                                 "error": f"图片识别失败: {e}"})
                     return
@@ -558,7 +588,7 @@ def generate():
                         try:
                             q = llm._call(SEARCH_SYSTEM_TINY, user_input, [])
                         except Exception as e:
-                            print(f"[llm-extract error] {e}")
+                            log.warning("[llm-extract error] %s", e)
                         if q:
                             cands = char_resolver.resolve_from_text(q)
                             via = "LLM英文标签"
@@ -569,7 +599,7 @@ def generate():
                                 cn = llm._call(EXTRACT_CN_SYSTEM,
                                                user_input, []) or ""
                             except Exception as e:
-                                print(f"[llm-cn error] {e}")
+                                log.warning("[llm-cn error] %s", e)
                             cn = cn.strip()
                             if cn and cn != "未知":
                                 cands = char_resolver.resolve_from_text(cn)
@@ -592,7 +622,7 @@ def generate():
                                     cands = char_resolver.resolve_from_text(q2)
                                     via = "浏览器搜索"
                             except Exception as e:
-                                print(f"[web search error] {e}")
+                                log.warning("[web search error] %s", e)
 
                     # (3) 组装结果
                     if cands:
@@ -606,16 +636,18 @@ def generate():
                                            for c in cands[:5]],
                             "results": (raw or "")[:800],
                         }
+                        log.info("[%s] search hit via=%s -> %s",
+                                 gid, via, best.get("character"))
                         # 仅当用户显式给出中文角色（role框/描述直名）时学习别名，
                         # 避免把 LLM 猜错的结果或整句描述写进别名表。
                         # 学习统一由 _translate_and_lookup 以精确中文名触发。
                     else:
-                        print(f"[search] 未找到角色: {user_input[:60]}")
+                        log.warning("[search] 未找到角色: %s", user_input[:60])
                         search_info = {"query": "", "via": via,
                                        "results": "",
                                        "error": "未找到匹配角色，已按无角色参考继续"}
                 except Exception as e:
-                    print(f"[search error] {e}")
+                    log.error("[search error] %s", e)
                     search_info = {"query": "", "results": "",
                                    "error": str(e)}
 
@@ -632,7 +664,9 @@ def generate():
                     prompt = llm._call(sp, user_input, history)
                 if not prompt:
                     raise RuntimeError("LLM 返回了空提示词")
+                log.info("[%s] llm prompt ok (%d 字符)", gid, len(prompt))
             except Exception as e:
+                log.error("[%s] llm prompt failed: %s", gid, e, exc_info=True)
                 yield _sse({"step": "error",
                             "error": f"提示词生成失败: {e}"})
                 return
@@ -641,10 +675,12 @@ def generate():
             if auto_resolution:
                 width, height, size_via = decide_resolution(user_input, llm,
                                                             history)
-                print(f"[size] auto -> {width}x{height} (via {size_via})")
+                log.info("[%s] size auto -> %sx%s (via %s)",
+                         gid, width, height, size_via)
 
             # ---------- Step 3: ComfyUI ----------
             yield _sse({"step": "comfyui"})
+            log.info("[%s] comfyui submit, size=%sx%s", gid, width, height)
             try:
                 path = comfy.generate(
                     wf, prompt,
@@ -655,12 +691,15 @@ def generate():
                     width_placeholder=settings.width_placeholder,
                     height_placeholder=settings.height_placeholder,
                 )
+                log.info("[%s] comfyui done -> %s", gid, path.name if path else None)
             except Exception as e:
+                log.error("[%s] comfyui failed: %s", gid, e, exc_info=True)
                 yield _sse({"step": "error",
                             "error": f"ComfyUI 生图失败: {e}"})
                 return
 
             if path and path.exists():
+                log.info("[%s] done, 图片已保存", gid)
                 yield _sse({
                     "step": "done",
                     "image": f"/outputs/{path.name}",
@@ -672,11 +711,14 @@ def generate():
                     "vlm": vlm_description,
                 })
             else:
+                log.error("[%s] comfyui 未返回图片路径", gid)
                 yield _sse({"step": "error",
                             "error": "生图失败，ComfyUI 未返回图片"})
         except Exception as e:
+            log.error("[%s] 生成异常: %s", get_request_id(), e, exc_info=True)
             yield _sse({"step": "error", "error": str(e)})
         finally:
+            set_request_id("")
             _gen_lock.release()
 
     return Response(stream_with_context(event_stream()),
@@ -702,7 +744,49 @@ def not_found(e):
 
 @app.errorhandler(Exception)
 def handle_all_errors(e):
+    log.error("服务器错误: %s", e, exc_info=True)
     return jsonify({"error": f"服务器错误: {e}"}), 500
+
+
+# ====================================================================== #
+# 日志读取 / 前端错误上报
+# ====================================================================== #
+@app.route("/api/logs", methods=["GET"])
+def api_logs():
+    """返回日志文件尾部内容，供页面日志查看器轮询展示。
+
+    参数: ?lines=200 (默认 200, 上限 2000)
+    """
+    from logger import LOG_FILE
+    lines = request.args.get("lines", default=200, type=int)
+    lines = max(10, min(lines, 2000))
+    if not LOG_FILE.exists():
+        return jsonify({"success": True, "log": "", "file": str(LOG_FILE),
+                        "lines": 0})
+    try:
+        with open(LOG_FILE, encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+        tail = all_lines[-lines:]
+        # 文件长度可能很大，仅回传尾部，避免前端卡顿
+        return jsonify({"success": True, "log": "".join(tail),
+                        "file": str(LOG_FILE),
+                        "total": len(all_lines),
+                        "lines": len(tail)})
+    except Exception as e:
+        log.error("读取日志失败: %s", e, exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/logs/frontend", methods=["POST"])
+def api_logs_frontend():
+    """接收前端上报的 JS 错误（window.onerror / unhandledrejection）。"""
+    data = request.get_json() or {}
+    msg = data.get("message") or data.get("reason") or ""
+    src = data.get("source") or data.get("stack") or ""
+    loc = data.get("location") or ""
+    f_log = get_logger("frontend")
+    f_log.error("前端错误: %s | %s | %s", msg, loc, src[:1000])
+    return jsonify({"success": True})
 
 
 if __name__ == "__main__":
@@ -711,6 +795,7 @@ if __name__ == "__main__":
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     host = _os.getenv("HOST", "0.0.0.0")
     port = int(_os.getenv("PORT", "5000"))
+    log.info("喵梓二号 启动，日志文件: %s", "logs/app.log")
     print("=" * 46)
     print("  喵梓二号 已启动")
     print(f"  本机访问:  http://127.0.0.1:{port}")
