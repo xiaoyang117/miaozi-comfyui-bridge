@@ -70,16 +70,17 @@ def _load_characters(db_path: Path) -> set[str]:
 def _clean_cn(raw: str, allow_ascii: bool = False) -> list[str]:
     """把 cn_name 拆成干净的中文名候选列表。
 
-    allow_ascii=True 用于作品名（如 东方Project / Fate），
-    角色名保持纯中文严格匹配以挡机翻乱码。
+    - 先剥离括号注释「xxx（作品中文名）」→ 取主体中文名
+    - allow_ascii=True 用于作品名（如 东方Project / Fate），
+      角色名保持纯中文严格匹配以挡机翻乱码。
     """
     if not raw:
         return []
+    raw = re.sub(r"[（(][^（）()]*[）)]", "", raw)  # 去（…）注释
     out: list[str] = []
     pat = _CN_ASCII_LEN if allow_ascii else _CN_LEN
-    for part in re.split(r"[、，,;；/|]", raw):
+    for part in re.split(r"[、，,;；/|·]", raw):
         part = part.strip()
-        # 剔除解释段（含数字/字母混排或 "xx是yy" 长尾）
         if not part or not pat.match(part):
             continue
         if any(w in part for w in _SKIP_WORDS):

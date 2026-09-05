@@ -19,3 +19,4 @@ character_lookup/zh_names.json
 character_lookup/zh_works.json
 # 用户下载的 Aligadai 中文翻译数据源(本地保留, 不入库)
 character_lookup/danbooru-10w-zh_cn.txt
+character_lookup/tag.sqlite
