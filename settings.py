@@ -52,7 +52,6 @@ DEFAULT_SETTINGS = {
     # ---- 搜索 ----
     "tavily_key": "",
     "tavily_max_results": 5,
-    "use_browser_search": False,
     "search_sources": [
         {"name": "Bing", "url": "https://www.bing.com/search?q={query}&count={count}"}
     ],
@@ -201,10 +200,6 @@ class Settings:
     @property
     def tavily_max_results(self) -> int:
         return _to_int(self._data.get("tavily_max_results", 5), 5)
-
-    @property
-    def use_browser_search(self) -> bool:
-        return bool(self._data.get("use_browser_search", False))
 
     @property
     def proxy_url(self) -> str:

@@ -8,7 +8,6 @@ from logger import get_logger as _get_logger
 logger = _get_logger("llm")
 
 from .search import tavily_search
-from .browser_search import browser_search
 
 PROMPT_SYSTEM = (
     "You are a prompt generator. "
@@ -101,16 +100,12 @@ PROMPT_WITH_CONTEXT_SPECIFIC = (
 class LLMClient:
     def __init__(self, base_url: str = "", api_key: str = "", model: str = "",
                  custom_system_prompt: str = "",
-                 tavily_key: str = "", tavily_max_results: int = 5,
-                 use_browser_search: bool = False,
-                 search_url: str = None):
+                 tavily_key: str = "", tavily_max_results: int = 5):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.tavily_key = tavily_key
         self.tavily_max_results = tavily_max_results
-        self.use_browser_search = use_browser_search
-        self.search_url = search_url
         self._prompt_system = custom_system_prompt.strip() or PROMPT_SYSTEM
 
     def _call(self, system: str, user: str, history: list = None) -> str:
@@ -214,9 +209,7 @@ class LLMClient:
                 query = self._call(SEARCH_SYSTEM, user_input, history)
                 if not query:
                     raise ValueError("empty query")
-                if self.use_browser_search:
-                    raw = browser_search(query, self.tavily_max_results, self.search_url)
-                elif self.tavily_key:
+                if self.tavily_key:
                     raw = tavily_search(self.tavily_key, query, self.tavily_max_results)
                 else:
                     raw = None

@@ -32,10 +32,6 @@
       </div>
       <div class="toolbar-sep"></div>
       <div class="toolbar-group">
-        <select id="searchUrlIdx" title="选择搜索源"></select>
-      </div>
-      <div class="toolbar-sep"></div>
-      <div class="toolbar-group">
         <select id="chat_workflow" title="选择工作流"></select>
       </div>
       <div class="toolbar-sep"></div>
@@ -171,30 +167,17 @@
     <!-- 搜索 -->
     <div class="settings-group">
       <h3>角色搜索</h3>
-      <div class="toggle-row">
-        <label class="toggle-label">
-          <input type="checkbox" id="s_use_browser_search">
-          <span class="toggle-slider"></span>浏览器搜索（需 Playwright + Chromium）
-        </label>
-      </div>
       <label>本地角色库查询测试</label>
       <input id="s_character_query" placeholder="如：白子 / shiroko / 碧蓝档案的白子">
       <div class="btn-inline-row">
         <button class="btn-secondary" onclick="testCharacters()">测试角色查询</button>
         <button class="btn-secondary" onclick="testResolve()">🔍 解析诊断</button>
       </div>
-      <p class="field-hint">支持中文名（内置常见角色）、英文/罗马音、或任意描述（如"碧蓝档案的白子"）。命中后特征标签会自动作为生图参考；解析失败时可用对话栏的"角色标签"框手动指定。</p>
+      <p class="field-hint">角色识别完全在本地完成：英文/罗马音直查 + 中文别名表（内置常见角色）+ LLM 兜底翻译，无需联网。命中后特征标签自动作为生图参考；解析失败可用对话栏"角色标签"框手动指定。</p>
 
       <hr class="sep">
-      <label>搜索源管理</label>
-      <div id="sourceList" class="source-list"></div>
-      <button class="btn-add-source" onclick="addSource()">+ 添加搜索源</button>
-      <div class="btn-inline-row" style="margin-top:0">
-        <button class="btn-secondary" onclick="saveSources()">保存搜索源</button>
-      </div>
-
-      <label>Tavily API Key（浏览器搜索关闭时使用）</label>
-      <input id="s_tavily_key" type="password" oncopy="return false" oncut="return false" placeholder="留空则不启用">
+      <label>Tavily API Key（旧版在线搜索通道，可选）</label>
+      <input id="s_tavily_key" type="password" oncopy="return false" oncut="return false" placeholder="留空则角色识别只用本地库">
       <label>结果数量</label>
       <input id="s_tavily_max_results" type="number" min="1" max="20">
       <div class="btn-inline-row">
@@ -332,7 +315,6 @@ let chatLog = [];
 let isGenerating = false;
 let selectedImages = [];
 let userImageCache = {};
-let searchSources = [];
 let resPresets = [];
 
 // ================= 分辨率预设 =================
@@ -751,7 +733,7 @@ async function sendMessage() {
         body: JSON.stringify({
           prompt: promptText, use_search: useSearch,
           role: roleTag,
-          history: [], search_url_idx: parseInt(document.getElementById('searchUrlIdx').value)||0,
+          history: [],
           workflow_path: wfPath,
           auto_resolution: !!res.auto,
           width: res.width, height: res.height,
@@ -842,41 +824,7 @@ chatInputEl.addEventListener('drop', function(e){
   if (files.length) addImages(files);
 });
 
-// ================= 搜索源管理 =================
-function renderSourceList() {
-  const list = document.getElementById('sourceList'); list.innerHTML='';
-  searchSources.forEach((src,i)=>{
-    const row = document.createElement('div'); row.className='source-row';
-    row.innerHTML = `
-      <input class="source-name" value="${escapeHtml(src.name)}" placeholder="名称" data-idx="${i}">
-      <input value="${escapeHtml(src.url)}" placeholder="https://...?q={query}" data-idx="${i}" data-k="url">
-      <button class="btn-del-source" onclick="removeSource(${i})">×</button>`;
-    list.appendChild(row);
-  });
-}
-function populateSourceDropdown() {
-  const sel = document.getElementById('searchUrlIdx'); sel.innerHTML='';
-  searchSources.forEach((src,i)=>{ const o=document.createElement('option'); o.value=i; o.textContent=src.name||'未命名'; sel.appendChild(o); });
-}
 function escapeHtml(s){ return String(s??'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-function addSource(){ searchSources.push({name:'',url:''}); renderSourceList(); }
-function removeSource(i){ searchSources.splice(i,1); renderSourceList(); }
-function collectSources(){
-  document.querySelectorAll('#sourceList .source-row').forEach(row=>{
-    const i = parseInt(row.querySelector('.source-name').dataset.idx);
-    searchSources[i] = { name: row.querySelector('.source-name').value.trim(),
-                         url: row.querySelector('[data-k="url"]').value.trim() };
-  });
-}
-async function saveSources() {
-  collectSources();
-  searchSources = searchSources.filter(s=>s.url);
-  if (!searchSources.length) searchSources=[{name:'Bing',url:'https://www.bing.com/search?q={query}&count={count}'}];
-  const r = await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({search_sources:searchSources})});
-  const d = await r.json();
-  if (d.success){ renderSourceList(); populateSourceDropdown(); showModal('搜索源已保存','success'); }
-  else showModal('保存失败: '+(d.error||''),'error');
-}
 
 // ================= 配置读写 =================
 async function loadSettings(silent) {
@@ -901,12 +849,7 @@ async function loadSettings(silent) {
       $('s_gen_width').value = s.gen_width??896;
       $('s_gen_height').value = s.gen_height??1152;
       $('s_history_rounds').value = s.history_rounds??2;
-      const bs = !!s.use_browser_search;
-      $('s_use_browser_search').checked = bs;
-      searchSources = Array.isArray(s.search_sources)&&s.search_sources.length ? s.search_sources
-                    : [{name:'Bing',url:'https://www.bing.com/search?q={query}&count={count}'}];
       resPresets = parseResPresets(s.resolution_presets);
-      renderSourceList(); populateSourceDropdown();
       renderResPresetEditor(); populateResDropdown();
       if (!silent) console.log('settings loaded');
     } else if (!silent) console.warn('settings load failed', d);
@@ -915,7 +858,6 @@ async function loadSettings(silent) {
 
 async function saveSettings() {
   hideError('settingsError');
-  collectSources();
   collectResPresets();
   const $ = id => document.getElementById(id);
   const wfName = $('s_workflow_path').value.trim();
@@ -929,7 +871,6 @@ async function saveSettings() {
     custom_system_prompt: $('s_custom_system_prompt').value,
     tavily_key: $('s_tavily_key').value.trim(),
     tavily_max_results: parseInt($('s_tavily_max_results').value)||5,
-    use_browser_search: $('s_use_browser_search').checked,
     comfyui_url: $('s_comfyui_url').value.trim(),
     prompt_placeholder: $('s_prompt_placeholder').value.trim(),
     save_node_id: $('s_save_node_id').value.trim(),
@@ -937,7 +878,6 @@ async function saveSettings() {
     gen_width: parseInt($('s_gen_width').value)||896,
     gen_height: parseInt($('s_gen_height').value)||1152,
     resolution_presets: resPresets,
-    search_sources: searchSources,
     history_rounds: parseInt($('s_history_rounds').value)||0,
   };
   try {
@@ -945,7 +885,7 @@ async function saveSettings() {
     const d = await r.json();
     if (d.success) {
       showModal('配置已保存 ✅','success');
-      renderSourceList(); populateSourceDropdown(); renderResPresetEditor(); populateResDropdown();
+      renderResPresetEditor(); populateResDropdown();
     } else showError('settingsError', d.error||'保存失败');
   } catch(e) { showError('settingsError','保存失败: '+e.message); }
 }

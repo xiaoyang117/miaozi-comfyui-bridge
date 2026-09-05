@@ -21,7 +21,7 @@ LLM 驱动的 ComfyUI 文生图 / 图生图桥接 Web 应用。
   - 手动指定角色标签框（完全绕过识别）
 - 📐 分辨率预设下拉，自动改写工作流 `EmptyLatentImage`
 - 💬 多轮对话历史、图片放大/复制/保存、聊天记录本地持久化
-- 🌐 可选浏览器搜索（Playwright）与 Tavily 搜索作为角色线索补充
+- 📊 任务面板：网页/API 触发的生成均实时可见进度
 
 ---
 
@@ -31,7 +31,6 @@ LLM 驱动的 ComfyUI 文生图 / 图生图桥接 Web 应用。
 
 ```bash
 pip install -r requirements.txt
-python -m playwright install chromium   # 仅使用浏览器搜索时需要
 ```
 
 Windows 可直接双击 `start.bat`（自动装依赖 + 启动）。

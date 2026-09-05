@@ -3,6 +3,7 @@ __pycache__/
 .env
 outputs/
 logs/
+start.log
 *.egg-info/
 .venv/
 venv/

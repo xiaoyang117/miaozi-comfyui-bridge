@@ -128,10 +128,7 @@ def _log_request():
 # ====================================================================== #
 # 工厂
 # ====================================================================== #
-def make_llm(search_url_idx: int = 0) -> LLMClient:
-    sources = settings.search_sources
-    url = sources[search_url_idx]["url"] if 0 <= search_url_idx < len(sources) \
-        else sources[0]["url"]
+def make_llm() -> LLMClient:
     return LLMClient(
         base_url=settings.llm_base_url,
         api_key=settings.llm_api_key,
@@ -139,8 +136,6 @@ def make_llm(search_url_idx: int = 0) -> LLMClient:
         custom_system_prompt=settings.custom_system_prompt,
         tavily_key=settings.tavily_key,
         tavily_max_results=settings.tavily_max_results,
-        use_browser_search=settings.use_browser_search,
-        search_url=url,
     )
 
 
@@ -574,7 +569,6 @@ def _run_generation(data: dict):
         wf_path = data.get("workflow_path") or settings.workflow_path
         use_search = bool(data.get("use_search", True))
         history = data.get("history") or []
-        search_url_idx = int(data.get("search_url_idx") or 0)
         auto_resolution = bool(data.get("auto_resolution", False))
         # 直通模式：外部已给标准标签，跳过 LLM 改写与角色搜索，原样提交 ComfyUI
         raw_prompt = bool(data.get("raw_prompt", False))
@@ -602,7 +596,7 @@ def _run_generation(data: dict):
             yield {"step": "error", "error": f"工作流解析失败: {e}"}
             return
 
-        llm = make_llm(search_url_idx=search_url_idx)
+        llm = make_llm()
         comfy = make_comfy()
 
         # ---------- Step 0: VLM ----------
@@ -683,22 +677,6 @@ def _run_generation(data: dict):
                         if not cands and cn and cn != "未知":
                             cands = _translate_and_lookup(cn, llm, history)
                             via = "LLM翻译"
-                    # 浏览器搜索辅助（可选，给 LLM 提供线索）
-                    if not cands and settings.use_browser_search \
-                            and llm.search_url:
-                        try:
-                            from llm.browser_search import browser_search
-                            web_raw = browser_search(user_input, 5,
-                                                     llm.search_url)
-                            if web_raw:
-                                q2 = llm._call(SEARCH_SYSTEM,
-                                               f"用户需求: {user_input}"
-                                               f"\n网络搜索:\n{web_raw[:800]}",
-                                               history)
-                                cands = char_resolver.resolve_from_text(q2)
-                                via = "浏览器搜索"
-                        except Exception as e:
-                            log.warning("[web search error] %s", e)
 
                 # (3) 组装结果
                 if cands:
