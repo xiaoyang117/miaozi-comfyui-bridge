@@ -149,13 +149,17 @@ class ComfyUIClient:
 
     def generate(self, workflow: dict, prompt: str,
                  placeholder: str = "114514.1919810",
-                 save_node_id: str = "9",
+                 save_node_id: str = "",
                  width: Optional[int] = None,
                  height: Optional[int] = None,
                  width_placeholder: str = "",
                  height_placeholder: str = "",
                  progress_cb=None) -> Optional[Path]:
         """替换占位符 + 设置尺寸 + 提交 + 轮询 + 下载图片。
+
+        save_node_id 已无需手动配置：自动探测工作流里所有会输出图片的节点
+        （SaveImage / SaveAnimatedWEBP / PreviewImage 等）作为下载候选，
+        逐个尝试、谁有图用谁。save_node_id 仅作为附加的优先候选保留兼容。
 
         progress_cb: 可选回调 progress_cb(str)，等待期间周期回报进度文案。
         """
@@ -164,11 +168,41 @@ class ComfyUIClient:
         wf = self.apply_size(wf, width, height, width_placeholder, height_placeholder)
 
         prompt_id = self.submit(wf)
-        return self._wait_and_download(prompt_id, save_node_id,
+        node_ids = self._detect_image_node_ids(wf, save_node_id)
+        log.info("输出节点候选: %s (配置: %r)", node_ids, save_node_id)
+        return self._wait_and_download(prompt_id, node_ids,
                                        progress_cb=progress_cb)
 
+    def _detect_image_node_ids(self, wf: dict,
+                               configured: str = "") -> list:
+        """自动探测工作流里所有可能输出图片的节点 ID。
+
+        判定：class_type 以 Save/Preview 开头（SaveImage、SaveAnimatedWEBP、
+        PreviewImage 等），或 inputs 里含 filename_prefix（保存类节点的标志）。
+        返回有序去重候选：配置值优先（兼容旧行为），随后是探测到的节点。
+        """
+        cands: list[str] = []
+        seen = set()
+        def _add(nid):
+            s = str(nid)
+            if s and s not in seen:
+                seen.add(s)
+                cands.append(s)
+        if configured:
+            _add(configured)
+        for nid, node in (wf or {}).items():
+            if not isinstance(node, dict):
+                continue
+            ct = str(node.get("class_type") or "")
+            inputs = node.get("inputs")
+            if (ct.startswith("Save") or ct.startswith("Preview")
+                    or (isinstance(inputs, dict)
+                        and "filename_prefix" in inputs)):
+                _add(nid)
+        return cands
+
     def _wait_and_download(self, prompt_id: str,
-                           save_node_id: str,
+                           node_ids: list,
                            progress_cb=None) -> Optional[Path]:
         start = time.time()
         timeout = 300
@@ -207,38 +241,37 @@ class ComfyUIClient:
                     raise RuntimeError(
                         f"ComfyUI 节点 #{nid} ({ntype}) 执行错误:\n{err_msg}")
 
-            path = self._download_images(entry, save_node_id)
+            path = self._download_images(entry, node_ids)
             if path:
                 if progress_cb:
                     progress_cb("生成完成，正在保存图片…")
                 return path
-            # 若已执行完成但没匹配到图，退化为遍历所有输出
+            # 若已执行完成但候选节点都没图，退化为遍历全部输出
             if status.get("completed") or status.get("status_str") == "success":
-                log.warning("ComfyUI 任务已完成但 save_node_id=%s 无图，"
-                            "尝试遍历全部输出", save_node_id)
-                path = self._download_images(entry, save_node_id, fallback=True)
+                log.warning("ComfyUI 任务已完成但候选输出节点 %s 无图，"
+                            "尝试遍历全部输出", node_ids)
+                path = self._download_images(entry, node_ids, fallback=True)
                 if path:
                     if progress_cb:
                         progress_cb("生成完成，正在保存图片…")
                     return path
                 # 任务已完成但找不到任何图片 => 直接失败而非空转
                 raise RuntimeError(
-                    "ComfyUI 任务已完成但未返回图片，请检查 save_node_id 是否与"
-                    "工作流中的 SaveImage 节点一致")
+                    "ComfyUI 任务已完成但未返回图片，请检查工作流中是否有"
+                    "SaveImage 等图片输出节点")
 
         log.error("ComfyUI 生图超时（%s 秒），prompt_id=%s", timeout, prompt_id)
         raise RuntimeError(f"ComfyUI 生图超时（{timeout} 秒），请检查工作流节点配置")
 
-    def _download_images(self, entry: dict, save_node_id: str,
+    def _download_images(self, entry: dict, node_ids: list,
                          fallback: bool = False) -> Optional[Path]:
         outputs = entry.get("outputs", {})
         if not isinstance(outputs, dict):
             return None
 
-        node_ids = []
-        if save_node_id:
-            node_ids.append(save_node_id)
         if fallback:
+            node_ids = list(outputs.keys())
+        if not node_ids:
             node_ids = list(outputs.keys())
 
         for nid in node_ids:

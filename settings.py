@@ -31,9 +31,9 @@ DEFAULT_SETTINGS = {
     "workflow_path": "MIAOMIAO 1.json",
     # 提示词占位符：出现在工作流 positive 节点文本里的字符串，会被替换为 LLM 生成的提示词
     "prompt_placeholder": "114514.1919810",
-    # 保存图片的节点 ID（SaveImage）。66 对应 MIAOMIAO 工作流；
-    # 若更换工作流需在配置页改成对应的 SaveImage 节点号。找不到时后端自动兜底。
-    "save_node_id": "66",
+    # 保存图片的节点 ID（SaveImage）。留空=自动探测工作流中的图片输出节点，
+    # 一般无需手动配置；仅在自动探测失效时手动指定。
+    "save_node_id": "",
 
     # ---- 尺寸占位符（用于提示词内联指定宽高，可选）----
     "width_placeholder": "chang",
