@@ -26,13 +26,13 @@ DEFAULT_SETTINGS = {
     "comfyui_url": "http://127.0.0.1:8188",
 
     # ---- 工作流 ----
-    # 注意：此字段为相对于 workflows 目录的文件名（如 "default_workflow.json"），
-    # 也兼容绝对路径。若留空，默认取 workflows/default_workflow.json。
-    "workflow_path": "default_workflow.json",
+    # 注意：此字段为相对于 workflows 目录的文件名（如 "MIAOMIAO 1.json"），
+    # 也兼容绝对路径。若留空，默认取 workflows/MIAOMIAO 1.json。
+    "workflow_path": "MIAOMIAO 1.json",
     # 提示词占位符：出现在工作流 positive 节点文本里的字符串，会被替换为 LLM 生成的提示词
     "prompt_placeholder": "114514.1919810",
-    # 保存图片的节点 ID（SaveImage）。默认 66 对应 MIAOMIAO 工作流；
-    # 若用 default_workflow 需在配置页改成 9。找不到时后端会自动遍历兜底。
+    # 保存图片的节点 ID（SaveImage）。66 对应 MIAOMIAO 工作流；
+    # 若更换工作流需在配置页改成对应的 SaveImage 节点号。找不到时后端自动兜底。
     "save_node_id": "66",
 
     # ---- 尺寸占位符（用于提示词内联指定宽高，可选）----
@@ -148,7 +148,7 @@ class Settings:
         """返回可用的工作流路径；若为相对名则定位到 workflows 目录。"""
         p = str(self._data.get("workflow_path", "") or "").strip()
         if not p:
-            p = "default_workflow.json"
+            p = "MIAOMIAO 1.json"
         cand = Path(p)
         if not cand.is_absolute():
             cand = BASE_DIR / "workflows" / p

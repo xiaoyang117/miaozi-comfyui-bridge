@@ -138,8 +138,8 @@
         </div>
       </div>
       <p class="field-hint">占位符会出现在工作流正向提示词节点中，将被 LLM 生成的提示词替换。</p>
-      <label>默认工作流（相对名或留空=default_workflow.json）</label>
-      <input id="s_workflow_path" placeholder="default_workflow.json">
+      <label>默认工作流（相对名或留空=MIAOMIAO 1.json）</label>
+      <input id="s_workflow_path" placeholder="MIAOMIAO 1.json">
     </div>
 
     <!-- 分辨率 -->
@@ -948,7 +948,7 @@ async function loadSettings(silent) {
       $('s_comfyui_url').value = s.comfyui_url||'';
       $('s_prompt_placeholder').value = s.prompt_placeholder||'114514.1919810';
       $('s_save_node_id').value = s.save_node_id||'9';
-      $('s_workflow_path').value = (s.workflow_path && s.workflow_path.includes('/')) ? (s.workflow_path.split('/').pop()) : (s.workflow_path||'default_workflow.json');
+      $('s_workflow_path').value = (s.workflow_path && s.workflow_path.includes('/')) ? (s.workflow_path.split('/').pop()) : (s.workflow_path||'MIAOMIAO 1.json');
       $('s_gen_width').value = s.gen_width??896;
       $('s_gen_height').value = s.gen_height??1152;
       $('s_history_rounds').value = s.history_rounds??2;
@@ -975,7 +975,7 @@ async function saveSettings() {
     comfyui_url: $('s_comfyui_url').value.trim(),
     prompt_placeholder: $('s_prompt_placeholder').value.trim(),
     save_node_id: $('s_save_node_id').value.trim(),
-    workflow_path: wfName || 'default_workflow.json',
+    workflow_path: wfName || 'MIAOMIAO 1.json',
     gen_width: parseInt($('s_gen_width').value)||896,
     gen_height: parseInt($('s_gen_height').value)||1152,
     resolution_presets: resPresets,
