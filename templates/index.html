@@ -971,6 +971,7 @@ function updateCtxBar() {
   const histRounds = parseInt(document.getElementById('s_history_rounds').value) || 0;
   // 未配置窗口 或 历史轮数为 0（每轮全新对话，无可视上下文预算）→ 隐藏
   if (!total || histRounds <= 0) { bar.classList.add('hidden'); return; }
+  bar.classList.remove('hidden');   // 修复: 显示分支必须移除 hidden（之前遗漏）
   const used = ctxEstimateNow();
   const pct = Math.min(100, Math.round(used / total * 100));
   const fill = document.getElementById('ctxFill');
