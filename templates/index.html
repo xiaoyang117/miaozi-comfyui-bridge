@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
-<title>喵梓二号 · ComfyUI 生图助手</title>
+<title>喵梓二号 · ComfyUI 生图助手 (v1.4)</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -12,6 +12,7 @@
   <!-- ================= 头部 ================= -->
   <div class="header">
     <h1>喵梓二号<small>ComfyUI 生图助手</small></h1>
+    <span id="uiVer" style="display:none">v20260906b</span>
     <nav class="tabs">
       <button class="tab active" data-tab="chat" onclick="switchTab('chat')">对话</button>
       <button class="tab" data-tab="settings" onclick="switchTab('settings')">配置</button>
@@ -1444,6 +1445,8 @@ window.addEventListener('unhandledrejection', function(e) {
 });
 
 // ================= 初始化 =================
+console.log('%c[喵梓] v1.4 支持角色候选弹卡（若此处无输出请硬刷新 Ctrl+Shift+R）', 'color:#a5b4fc');
+console.log('预检函数存在:', typeof askRoleChoice === 'function');
 document.getElementById('chat_workflow').addEventListener('change', saveWfSelection);
 document.getElementById('chat_resolution').addEventListener('change', saveResSelection);
 loadSettings();
