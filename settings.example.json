@@ -68,5 +68,6 @@
   "danbooru_username": "",
   "history_rounds": 2,
   "llm_context_tokens": 32768,
-  "tag_selection": true
+  "tag_selection": true,
+  "tag_reselect": true
 }

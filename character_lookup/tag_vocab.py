@@ -256,6 +256,7 @@ def format_candidates(cands: list[dict], max_n: int = 200) -> str:
     return ", ".join(parts)
 
 
+
 def stats() -> str:
     if not _available():
         return "词库不可用"

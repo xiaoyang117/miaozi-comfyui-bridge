@@ -774,45 +774,55 @@ def _run_generation(data: dict):
             yield {"step": "llm",
                    "msg": "🧠 生成提示词中（本地模型较慢，通常 30~60 秒，请耐心）…"}
             try:
-                # 标签选词路径：词库可用 + 开关开启 -> 召回候选池让 LLM 从中选
+                # 第一步：先自由生成"草稿"（带标签风格引导）
+                draft = None
+                if search_info and raw:
+                    ctx = f"角色参考资料:\n{raw}\n\n用户需求: {user_input}"
+                    draft = llm._call(PROMPT_WITH_CONTEXT_SPECIFIC,
+                                      ctx, history)
+                else:
+                    sp = PROMPT_SYSTEM_SPECIFIC if use_search \
+                        else llm._prompt_system
+                    draft = llm._call(sp, user_input, history)
+
+                # 标签化处理：词库可用 + 总开关开启
                 tag_prompt = None
                 if settings.tag_selection and char_tags.is_available():
-                    cands_tag = char_tags.recall_candidates(
-                        user_input,
-                        extra_tags=[char_core_tags] if char_core_tags else None,
-                        limit=200)
-                    if len(cands_tag) >= 30:
-                        pool = char_tags.format_candidates(cands_tag)
-                        user_req = (f"历史对话及需求上下文：\n{raw}\n\n"
-                                    if search_info and raw else "") + user_input
-                        ctx = (f"用户需求：{user_req}\n\n"
-                               f"候选标签池（只允许从这里选）：\n{pool}")
-                        try:
-                            # 需求与角色参考已并入 ctx，不再重复带 history
-                            picked = llm._call(TAG_SELECT_SYSTEM, ctx, [])
-                        except Exception:
-                            picked = ""
-                        if picked:
-                            tag_prompt = char_tags.validate_tags(picked)
-                            if tag_prompt:
+                    if settings.tag_reselect:
+                        # 复选开：用草稿召回候选池，让 LLM 重选补正飘词
+                        cands_tag = char_tags.recall_candidates(
+                            draft or user_input,
+                            extra_tags=[char_core_tags]
+                            if char_core_tags else None,
+                            limit=200)
+                        if len(cands_tag) >= 30:
+                            pool = char_tags.format_candidates(cands_tag)
+                            user_req = ((f"角色参考草稿：\n{draft}\n\n"
+                                         if draft else "") + user_input)
+                            ctx = (f"用户需求：{user_req}\n\n"
+                                   f"候选标签池（只允许从这里选）：\n{pool}")
+                            try:
+                                picked = llm._call(TAG_SELECT_SYSTEM, ctx, [])
+                            except Exception:
+                                picked = ""
+                            if picked:
+                                tag_prompt = char_tags.validate_tags(picked)
                                 log.info(
-                                    "[%s] 标签选词: 候选%d -> 选中%d -> 校验后%d",
-                                    gid, len(cands_tag),
-                                    len(picked.split(",")),
+                                    "[%s] 标签复选: 草稿%d字 候选%d -> 校验后%d",
+                                    gid, len(draft or ""), len(cands_tag),
                                     len(tag_prompt))
+                    if not tag_prompt:
+                        # 复选关（或复选失败）：直接校验草稿，剔除不在词库的词
+                        tag_prompt = char_tags.validate_tags(draft or "")
+                        log.info("[%s] 标签校验(无复选): %d 字 -> %d 标签",
+                                 gid, len(draft or ""), len(tag_prompt))
+
                 if tag_prompt:
-                    # 校验后的标签直接作为提示词主体；角色标签已含在 core_tags 候选
+                    # 校验/复选出的真实标签作为提示词主体
                     prompt = ", ".join(tag_prompt)
                 else:
-                    # 回退：原有自由生成路径
-                    if search_info and raw:
-                        ctx = f"角色参考资料:\n{raw}\n\n用户需求: {user_input}"
-                        prompt = llm._call(PROMPT_WITH_CONTEXT_SPECIFIC,
-                                           ctx, history)
-                    else:
-                        sp = PROMPT_SYSTEM_SPECIFIC if use_search \
-                            else llm._prompt_system
-                        prompt = llm._call(sp, user_input, history)
+                    # 回退：草稿原样使用（词库不可用/总开关关/校验全被剔）
+                    prompt = draft or ""
                 if not prompt:
                     raise RuntimeError("LLM 返回了空提示词")
                 # 角色已命中但 LLM 漏输出角色标签时，前置注入（确定性兜底，
@@ -929,17 +939,19 @@ def _run_generation(data: dict):
         set_request_id("")
 
 
-# 标签选词模式系统提示词：要求 LLM 只能从给定候选池挑选标签，
+# 标签复选系统提示词：要求 LLM 参考草稿、从候选池挑选最终标签，
 # 不得新增池外词，从源头杜绝编造不存在的 danbooru 标签。
 TAG_SELECT_SYSTEM = (
-    "你是一个 danbooru 标签选择器。用户给出画面需求和一个候选标签池。\n"
-    "请从候选池中挑选最贴合用户需求的标签。\n"
+    "你是一个 danbooru 标签选择器。用户给出画面需求、一份参考草稿和一个候选标签池。\n"
+    "请从候选池中挑选最贴合用户需求的标签，作为最终提示词。\n"
     "要求：\n"
     "1. 只输出选中标签的英文名，逗号+空格分隔，不要序号不要解释\n"
     "2. 挑选 8~25 个，覆盖画面主体、姿态、场景、氛围\n"
     "3. 每个标签必须来自候选池，禁止输出池外任何词\n"
-    "4. 若用户需求包含历史对话中的要求，沿用仍适用的标签（如历史里是"
-    "泳装、本次加海边，则泳装+海边都要保留）；若与本次明确冲突则替换为本次要求"
+    "4. 草稿中含义正确的标签（如角色特征、质量词已在池中）应保留，"
+    "草稿中模糊/编造的部分用候选池中更标准贴切的标签替代\n"
+    "5. 若草稿来自历史对话的延续（如历史是泳装、本次加海边），"
+    "沿用仍适用的标签并补入新场景标签"
 )
 
 

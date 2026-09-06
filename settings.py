@@ -68,6 +68,8 @@ DEFAULT_SETTINGS = {
     # ---- 提示词标签化 ----
     # 从 danbooru 标签词库召回候选，让 LLM 从中挑选（保证输出为真实标签）
     "tag_selection": True,
+    # 草稿合法率低于阈值时，是否再召回候选让 LLM 复选补正；关=只剔非法词不补位
+    "tag_reselect": True,
 }
 
 _settings_lock = threading.RLock()
@@ -230,6 +232,10 @@ class Settings:
     @property
     def tag_selection(self) -> bool:
         return bool(self._data.get("tag_selection", True))
+
+    @property
+    def tag_reselect(self) -> bool:
+        return bool(self._data.get("tag_reselect", True))
 
 
 def _to_int(value, default: int) -> int:
