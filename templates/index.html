@@ -530,6 +530,11 @@ function askRoleChoice(candidates, hintText) {
 function roleChoiceSkip() {   // 不选角色，直接生成（返回 undefined 继续）
   closeRoleChoiceModal(undefined);
 }
+// 判断一个字符串是否已是纯 danbooru slug 形态（不含中文/空格），
+// 是则用户已精确指定，不需要被预检覆盖
+function _looks_like_tag_value(s) {
+  return !!/^[A-Za-z0-9_\-(),.\s]{1,40}$/.test(s || '') && !/[\u4e00-\u9fff]/.test(s || '');
+}
 function closeRoleChoiceModal(result) {
   document.getElementById('roleChoiceModal').classList.add('hidden');
   const btn = document.getElementById('chatSendBtn');
@@ -1006,14 +1011,16 @@ async function sendMessage() {
     promptText = '历史对话:\n'+ctx+'\n\n用户当前输入: '+text;
   }
   let roleTag = document.getElementById('chat_role').value.trim();
-  // 发送前角色预检：开角色搜索、没手动填角色、且不是图片识别场景时，
-  // 先规则层识别，若多个候选则弹卡让用户确定用哪个（避免 LLM 猜错/多候选干扰）。
+  // 发送前角色预检：始终先预检（手填角色也可能解析出多候选须让用户确认），
+  // 跳过条件仅:不上传参考图 且 useSearch 开。
   // 在 push 气泡前执行——用户取消时不留痕迹。
-  if (useSearch && !roleTag && !hasImage) {
+  if (useSearch && !hasImage) {
     try {
+      // 用 text（不带历史）+ 用户手填的角色（若有）拼查询，提高识别精准度
+      const preQ = (roleTag ? (roleTag + ' ') : '') + text;
       const preRes = await fetch('/api/resolve/role', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ prompt: text }),   // 只用本条输入识别角色，历史不干扰
+        body: JSON.stringify({ prompt: preQ }),
       });
       const pre = await preRes.json();
       if (pre && pre.success && pre.need_choice && pre.candidates) {
@@ -1026,12 +1033,17 @@ async function sendMessage() {
           input.focus();
           return;
         }
-        if (chosen) roleTag = chosen;   // 选定角色 slug（仅本轮）
-        // chosen === undefined（"不选角色"）→ 不填 role，走后端默认
+        if (chosen) roleTag = chosen;   // 选定角色 slug 覆盖手填值
+        // chosen === undefined（"不选角色"）→ 不填 role
+      } else if (pre && pre.success && !pre.need_choice && pre.candidates
+                 && pre.candidates.length >= 1) {
+        // 单一候选：自动用它填充 roleTag（避免手填中文名解析错或后端歧义）
+        if (!roleTag || !_looks_like_tag_value(roleTag)) {
+          roleTag = pre.candidates[0].character;
+        }
       }
     } catch(e) {
       console.warn('角色预检失败:', e);
-      // 预检失败不阻断发送，但告知（便于排查）
       showModal('角色预检失败（已跳过，继续生成）: ' + (e && e.message || e), '');
     }
   }
