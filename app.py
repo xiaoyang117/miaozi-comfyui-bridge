@@ -11,6 +11,7 @@
 import itertools
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -240,6 +241,26 @@ def _fmt_best_candidate(d: dict) -> str:
     if tags:
         lines.append(f"特征标签: {', '.join(tags[:80])}")
     return "\n".join(lines)
+
+
+# 互斥特征组：同一组内不同值冲突（如不同发色/瞳色/体型），强制补回时只取第一个
+_CONFLICT_GROUPS = [
+    {"black_hair", "white_hair", "blonde_hair", "brown_hair", "red_hair",
+     "blue_hair", "green_hair", "purple_hair", "pink_hair", "grey_hair",
+     "silver_hair", "orange_hair", "multicolored_hair", "two-tone_hair"},
+    {"red_eyes", "blue_eyes", "green_eyes", "yellow_eyes", "purple_eyes",
+     "brown_eyes", "black_eyes", "pink_eyes", "grey_eyes", "heterochromia"},
+    {"small_breasts", "medium_breasts", "large_breasts", "huge_breasts"},
+    {"short_hair", "long_hair", "very_long_hair", "medium_hair"},
+]
+
+
+def _core_tags_conflict(tag: str, chosen: list[str]) -> bool:
+    """tag 与已选标签是否同组冲突（强制补回时避免把两个发色/瞳色都塞进去）。"""
+    for grp in _CONFLICT_GROUPS:
+        if tag in grp:
+            return any(c in grp for c in chosen)
+    return False
 
 
 def _looks_like_tag(s: str) -> bool:
@@ -803,27 +824,51 @@ def _run_generation(data: dict):
                 tag_prompt = None
                 if settings.tag_selection and char_tags.is_available():
                     if settings.tag_reselect:
-                        # 复选开：用草稿召回候选池，让 LLM 重选补正飘词
-                        cands_tag = char_tags.recall_candidates(
-                            draft or user_input,
-                            extra_tags=[char_core_tags]
-                            if char_core_tags else None,
-                            limit=200)
-                        if len(cands_tag) >= 30:
-                            pool = char_tags.format_candidates(cands_tag)
-                            user_req = ((f"角色参考草稿：\n{draft}\n\n"
-                                         if draft else "") + user_input)
-                            ctx = (f"用户需求：{user_req}\n\n"
-                                   f"候选标签池（只允许从这里选）：\n{pool}")
+                        # 复选开：角色特征单独一个池（尽量多选保本体），
+                        # 画面标签另一个池（选 8~15 个），一次调用挑完两区
+                        role_tags = []
+                        if char_core_tags:
+                            for t in re.split(r"[,\n]", char_core_tags):
+                                t2 = t.strip().replace(" ", "_")
+                                if t2 and t2 not in role_tags:
+                                    role_tags.append(t2)
+                        scene_cands = char_tags.recall_candidates(
+                            draft or user_input, limit=180)
+                        if (role_tags or len(scene_cands) >= 20):
+                            ctx_parts = [f"用户需求：{user_input}"]
+                            if draft:
+                                ctx_parts.append(f"参考草稿：{draft}")
+                            if role_tags:
+                                ctx_parts.append(
+                                    "角色特征区（尽量多选与角色形象相符的；"
+                                    "若多个标签冲突(如不同发色/瞳色)只选最贴合的一个）：\n"
+                                    + ", ".join(role_tags))
+                            if scene_cands:
+                                ctx_parts.append(
+                                    "画面区（从中选 8~15 个，覆盖姿态/场景/"
+                                    "服饰/氛围）：\n"
+                                    + char_tags.format_candidates(scene_cands))
+                            ctx = "\n\n".join(ctx_parts)
                             try:
                                 picked = llm._call(TAG_SELECT_SYSTEM, ctx, [])
                             except Exception:
                                 picked = ""
                             if picked:
                                 tag_prompt = char_tags.validate_tags(picked)
+                                # 角色特征区是高优先级：若 LLM 漏掉了多个，
+                                # 把未冲突的核心特征确定性补回（双保险）
+                                if role_tags:
+                                    kept = set(tag_prompt)
+                                    extra = [t for t in role_tags
+                                             if t not in kept]
+                                    # 只补回不与其他已选标签冲突的特征
+                                    for t in extra:
+                                        if not _core_tags_conflict(t,
+                                                                    tag_prompt):
+                                            tag_prompt.append(t)
                                 log.info(
-                                    "[%s] 标签复选: 草稿%d字 候选%d -> 校验后%d",
-                                    gid, len(draft or ""), len(cands_tag),
+                                    "[%s] 标签复选: 角色特征%d 画面%d -> 校验后%d",
+                                    gid, len(role_tags), len(scene_cands),
                                     len(tag_prompt))
                     if not tag_prompt:
                         # 复选关（或复选失败）：直接校验草稿，剔除不在词库的词
@@ -953,18 +998,19 @@ def _run_generation(data: dict):
         set_request_id("")
 
 
-# 标签复选系统提示词：要求 LLM 参考草稿、从候选池挑选最终标签，
-# 不得新增池外词，从源头杜绝编造不存在的 danbooru 标签。
+# 标签复选系统提示词：要求 LLM 参考草稿、从【角色特征区】尽量多选、
+# 从【画面区】挑选画面标签，不得新增区外词。
 TAG_SELECT_SYSTEM = (
-    "你是一个 danbooru 标签选择器。用户给出画面需求、一份参考草稿和一个候选标签池。\n"
-    "请从候选池中挑选最贴合用户需求的标签，作为最终提示词。\n"
+    "你是一个 danbooru 标签选择器。用户给出画面需求、参考草稿和两个候选区。\n"
+    "请从中挑选标签组成最终提示词。\n"
     "要求：\n"
     "1. 只输出选中标签的英文名，逗号+空格分隔，不要序号不要解释\n"
-    "2. 挑选 8~25 个，覆盖画面主体、姿态、场景、氛围\n"
-    "3. 每个标签必须来自候选池，禁止输出池外任何词\n"
-    "4. 草稿中含义正确的标签（如角色特征、质量词已在池中）应保留，"
-    "草稿中模糊/编造的部分用候选池中更标准贴切的标签替代\n"
-    "5. 若草稿来自历史对话的延续（如历史是泳装、本次加海边），"
+    "2. 【角色特征区】应尽量多选：与角色形象相符的特征全部保留\n"
+    "   （如发色/瞳色/服装/种族特征）；若区内出现冲突选项\n"
+    "   （如不同发色或不同瞳色），只选最贴合的一个\n"
+    "3. 【画面区】选 8~15 个，覆盖姿态、场景、服饰、氛围\n"
+    "4. 全部标签必须来自两个候选区，禁止输出区外任何词\n"
+    "5. 若草稿来自历史对话延续（历史是泳装、本次加海边），"
     "沿用仍适用的标签并补入新场景标签"
 )
 
