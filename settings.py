@@ -31,8 +31,9 @@ DEFAULT_SETTINGS = {
     "workflow_path": "default_workflow.json",
     # 提示词占位符：出现在工作流 positive 节点文本里的字符串，会被替换为 LLM 生成的提示词
     "prompt_placeholder": "114514.1919810",
-    # 保存图片的节点 ID（SaveImage）
-    "save_node_id": "9",
+    # 保存图片的节点 ID（SaveImage）。默认 66 对应 MIAOMIAO 工作流；
+    # 若用 default_workflow 需在配置页改成 9。找不到时后端会自动遍历兜底。
+    "save_node_id": "66",
 
     # ---- 尺寸占位符（用于提示词内联指定宽高，可选）----
     "width_placeholder": "chang",
@@ -95,7 +96,9 @@ class Settings:
 
     def get_all(self) -> dict:
         with _settings_lock:
-            return dict(self._data)
+            # 深拷贝：避免把内部可变对象（如 resolution_presets 的 dict/list）
+            # 直接暴露给调用方，防止其改值污染内存中的真实配置。
+            return json.loads(json.dumps(self._data, ensure_ascii=False))
 
     def update(self, data: dict):
         """仅允许白名单内的键，超范围的请求被丢弃。"""

@@ -25,7 +25,7 @@ set "PY=%CD%\venv\Scripts\python.exe"
 echo [1/3] Python: %PY%
 
 echo [2/3] Checking dependencies...
-"%PY%" -c "import flask,requests,waitress" 2>nul
+"%PY%" -c "import flask,requests" 2>nul
 if errorlevel 1 (
   echo Installing dependencies, please wait...
   "%PY%" -m pip install -r requirements.txt
