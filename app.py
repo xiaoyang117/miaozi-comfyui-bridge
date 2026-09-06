@@ -21,6 +21,7 @@ from flask import (Flask, Response, jsonify, render_template, request,
 
 from character_lookup.query import is_built, lookup as char_lookup
 from character_lookup import resolver as char_resolver
+from character_lookup import tag_vocab as char_tags
 from comfyui.client import ComfyUIClient
 from llm.client import (LLMClient, PROMPT_SYSTEM_SPECIFIC,
                         PROMPT_WITH_CONTEXT_SPECIFIC,
@@ -673,6 +674,7 @@ def _run_generation(data: dict):
         # ---------- Step 1: 角色识别（规则优先，LLM 兜底） ----------
         search_info = None
         raw = None
+        char_core_tags = ""   # 命中角色的 core_tags（供标签选词召回）
         role_hint = (data.get("role") or "").strip()
         if use_search:
             yield {"step": "search", "msg": "🔎 正在识别角色…"}
@@ -732,6 +734,7 @@ def _run_generation(data: dict):
                 if cands:
                     raw = _fmt_candidates(cands)
                     best = cands[0]
+                    char_core_tags = best.get("core_tags", "") or ""
                     search_info = {
                         "query": best.get("character", ""),
                         "copyright": best.get("copyright", ""),
@@ -771,14 +774,45 @@ def _run_generation(data: dict):
             yield {"step": "llm",
                    "msg": "🧠 生成提示词中（本地模型较慢，通常 30~60 秒，请耐心）…"}
             try:
-                if search_info and raw:
-                    ctx = f"角色参考资料:\n{raw}\n\n用户需求: {user_input}"
-                    prompt = llm._call(PROMPT_WITH_CONTEXT_SPECIFIC,
-                                       ctx, history)
+                # 标签选词路径：词库可用 + 开关开启 -> 召回候选池让 LLM 从中选
+                tag_prompt = None
+                if settings.tag_selection and char_tags.is_available():
+                    cands_tag = char_tags.recall_candidates(
+                        user_input,
+                        extra_tags=[char_core_tags] if char_core_tags else None,
+                        limit=200)
+                    if len(cands_tag) >= 30:
+                        pool = char_tags.format_candidates(cands_tag)
+                        user_req = (f"历史对话及需求上下文：\n{raw}\n\n"
+                                    if search_info and raw else "") + user_input
+                        ctx = (f"用户需求：{user_req}\n\n"
+                               f"候选标签池（只允许从这里选）：\n{pool}")
+                        try:
+                            # 需求与角色参考已并入 ctx，不再重复带 history
+                            picked = llm._call(TAG_SELECT_SYSTEM, ctx, [])
+                        except Exception:
+                            picked = ""
+                        if picked:
+                            tag_prompt = char_tags.validate_tags(picked)
+                            if tag_prompt:
+                                log.info(
+                                    "[%s] 标签选词: 候选%d -> 选中%d -> 校验后%d",
+                                    gid, len(cands_tag),
+                                    len(picked.split(",")),
+                                    len(tag_prompt))
+                if tag_prompt:
+                    # 校验后的标签直接作为提示词主体；角色标签已含在 core_tags 候选
+                    prompt = ", ".join(tag_prompt)
                 else:
-                    sp = PROMPT_SYSTEM_SPECIFIC if use_search \
-                        else llm._prompt_system
-                    prompt = llm._call(sp, user_input, history)
+                    # 回退：原有自由生成路径
+                    if search_info and raw:
+                        ctx = f"角色参考资料:\n{raw}\n\n用户需求: {user_input}"
+                        prompt = llm._call(PROMPT_WITH_CONTEXT_SPECIFIC,
+                                           ctx, history)
+                    else:
+                        sp = PROMPT_SYSTEM_SPECIFIC if use_search \
+                            else llm._prompt_system
+                        prompt = llm._call(sp, user_input, history)
                 if not prompt:
                     raise RuntimeError("LLM 返回了空提示词")
                 # 角色已命中但 LLM 漏输出角色标签时，前置注入（确定性兜底，
@@ -893,6 +927,20 @@ def _run_generation(data: dict):
         yield {"step": "error", "error": str(e)}
     finally:
         set_request_id("")
+
+
+# 标签选词模式系统提示词：要求 LLM 只能从给定候选池挑选标签，
+# 不得新增池外词，从源头杜绝编造不存在的 danbooru 标签。
+TAG_SELECT_SYSTEM = (
+    "你是一个 danbooru 标签选择器。用户给出画面需求和一个候选标签池。\n"
+    "请从候选池中挑选最贴合用户需求的标签。\n"
+    "要求：\n"
+    "1. 只输出选中标签的英文名，逗号+空格分隔，不要序号不要解释\n"
+    "2. 挑选 8~25 个，覆盖画面主体、姿态、场景、氛围\n"
+    "3. 每个标签必须来自候选池，禁止输出池外任何词\n"
+    "4. 若用户需求包含历史对话中的要求，沿用仍适用的标签（如历史里是"
+    "泳装、本次加海边，则泳装+海边都要保留）；若与本次明确冲突则替换为本次要求"
+)
 
 
 def _sse(payload: dict) -> str:

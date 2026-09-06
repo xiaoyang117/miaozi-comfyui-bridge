@@ -64,6 +64,10 @@ DEFAULT_SETTINGS = {
     "history_rounds": 2,
     # LLM 上下文窗口大小(token)：用于前端估算上下文使用量进度条
     "llm_context_tokens": 32768,
+
+    # ---- 提示词标签化 ----
+    # 从 danbooru 标签词库召回候选，让 LLM 从中挑选（保证输出为真实标签）
+    "tag_selection": True,
 }
 
 _settings_lock = threading.RLock()
@@ -222,6 +226,10 @@ class Settings:
     @property
     def llm_context_tokens(self) -> int:
         return _to_int(self._data.get("llm_context_tokens", 32768), 32768)
+
+    @property
+    def tag_selection(self) -> bool:
+        return bool(self._data.get("tag_selection", True))
 
 
 def _to_int(value, default: int) -> int:

@@ -217,6 +217,12 @@
       <p class="field-hint">历史轮数=每轮(用户消息+助手回复)上限，0=每次全新对话。
         上下文窗口填你模型的 max context（如 qwen2.5:7b 默认 32768），
         用于输入框上方进度条估算上下文使用量。</p>
+      <div class="toggle-row">
+        <label class="toggle-label" title="启用后从 danbooru 标签词库召回候选，让 LLM 从中挑选而非自由编造，保证提示词全部为真实标签">
+          <input type="checkbox" id="s_tag_selection" checked>
+          <span class="toggle-slider"></span>标签库选词（提示词只含真实标签）
+        </label>
+      </div>
     </div>
 
     <div id="settingsError" class="error hidden">
@@ -1139,6 +1145,7 @@ async function loadSettings(silent) {
       $('s_gen_height').value = s.gen_height??1152;
       $('s_history_rounds').value = s.history_rounds??2;
       $('s_llm_context_tokens').value = s.llm_context_tokens??32768;
+      $('s_tag_selection').checked = s.tag_selection !== false;
       resPresets = parseResPresets(s.resolution_presets);
       renderResPresetEditor(); populateResDropdown();
       updateCtxBar();  // 上下文窗口值已就绪，刷新进度条
@@ -1169,6 +1176,7 @@ async function saveSettings() {
     resolution_presets: resPresets,
     history_rounds: parseInt($('s_history_rounds').value)||0,
     llm_context_tokens: parseInt($('s_llm_context_tokens').value)||32768,
+    tag_selection: $('s_tag_selection').checked,
   };
   try {
     const r = await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});

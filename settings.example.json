@@ -66,5 +66,7 @@
   "proxy_url": "http://127.0.0.1:7897",
   "danbooru_api_key": "",
   "danbooru_username": "",
-  "history_rounds": 2
+  "history_rounds": 2,
+  "llm_context_tokens": 32768,
+  "tag_selection": true
 }
