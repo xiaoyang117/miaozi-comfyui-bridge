@@ -63,6 +63,12 @@
     </div>
 
     <div class="chat-input-bar">
+      <!-- LLM 上下文使用量进度条（实时估算发送给模型的 token） -->
+      <div class="ctx-bar" id="ctxBar" title="估算本次发送内容占 LLM 上下文窗口的比例（含系统提示/历史/当前输入）">
+        <span class="ctx-label">🧠 上下文</span>
+        <div class="ctx-track"><div class="ctx-fill" id="ctxFill"></div></div>
+        <span class="ctx-text" id="ctxText"></span>
+      </div>
       <div class="chat-input-row">
         <div class="textarea-wrap">
           <textarea id="chatInput" rows="2" placeholder="描述你想要生成的图片，如：碧蓝档案的白子，银白色长发，蓝色眼睛… (Enter 发送 / Shift+Enter 换行)"></textarea>
@@ -198,9 +204,19 @@
     <!-- 对话 -->
     <div class="settings-group">
       <h3>对话</h3>
-      <label>历史上下文轮数</label>
-      <input id="s_history_rounds" type="number" min="0" max="20">
-      <p class="field-hint">每轮=用户消息+助手回复；设为 0 则每次都是全新对话。</p>
+      <div class="settings-row">
+        <div>
+          <label>历史上下文轮数</label>
+          <input id="s_history_rounds" type="number" min="0" max="20">
+        </div>
+        <div>
+          <label>LLM 上下文窗口 (token)</label>
+          <input id="s_llm_context_tokens" type="number" min="1024" max="1000000" step="1024">
+        </div>
+      </div>
+      <p class="field-hint">历史轮数=每轮(用户消息+助手回复)上限，0=每次全新对话。
+        上下文窗口填你模型的 max context（如 qwen2.5:7b 默认 32768），
+        用于输入框上方进度条估算上下文使用量。</p>
     </div>
 
     <div id="settingsError" class="error hidden">
@@ -544,13 +560,25 @@ function removeImage() {
 // ================= 聊天记录持久化 =================
 function saveChatLog() { localStorage.setItem('chatLog', JSON.stringify(chatLog)); }
 function loadChatLog() { try { const r=localStorage.getItem('chatLog'); return r?JSON.parse(r):[]; } catch { return []; } }
-function restoreChatLog() { chatLog = loadChatLog(); chatLog.forEach((e,i)=>addChatBubble(e.role,e.text,e.imageUrl,e.search,i,e.vlm,e.size)); }
+function restoreChatLog() {
+  chatLog = loadChatLog();
+  // 重建 chatHistory（供上下文进度条与历史拼接使用）：user 消息用原文本，
+  // assistant 消息用生成提示词（与 sendMessage 的 push 内容一致）
+  chatHistory = [];
+  chatLog.forEach(e => {
+    if (e.role === 'user') chatHistory.push({ role: 'user', content: e.text });
+    else if (e.role === 'assistant') chatHistory.push({ role: 'assistant', content: e.text || '' });
+  });
+  chatLog.forEach((e,i)=>addChatBubble(e.role,e.text,e.imageUrl,e.search,i,e.vlm,e.size));
+  updateCtxBar();
+}
 function clearChatLog() {
   if (!confirm('确定清空所有聊天记录？')) return;
   chatLog = []; chatHistory = []; userImageCache = {};
   localStorage.removeItem('chatLog');
   document.getElementById('chatMessages').innerHTML = '';
   hideStep();
+  updateCtxBar();
 }
 
 // ================= 步骤指示 =================
@@ -826,6 +854,60 @@ async function wfEditSave(asNew) {
   } catch(e) { st.textContent = '❌ 保存失败: ' + e.message; }
 }
 
+// ================= LLM 上下文使用量进度条 =================
+// 估算发送给 LLM 的 token 占用（系统提示 + 历史 + 当前输入），
+// 与 sendMessage 实际拼装逻辑保持一致；粗估而非精确（提示"约"）。
+function _estTokens(text) {
+  if (!text) return 0;
+  // 中文 ≈1 token/字；英文/数字 ≈ 4 字符/token
+  let cjk = 0, other = 0;
+  for (const ch of text) {
+    if (/[\u4e00-\u9fff\u3400-\u4dbf]/.test(ch)) cjk++;
+    else other++;
+  }
+  return Math.round(cjk * 1.0 + other / 4);
+}
+function ctxSystemPrompt() {
+  // 与后端 PROMPT_SYSTEM_SPECIFIC / custom_system_prompt 近似
+  const custom = (document.getElementById('s_custom_system_prompt')||{}).value;
+  if (custom && custom.trim()) return custom;
+  // 后端默认英文系统提示词（PROMPT_SYSTEM_SPECIFIC，无角色时 PROMPT_SYSTEM）
+  return 'You are a prompt generator. Must include: character full name, source/work name, hair color, eye color, body type, and detailed visual features (clothing, accessories). Output ONLY the prompt. No greetings, no notes, no labels, no markdown, no JSON, no quotes. Do NOT include phrases like Here is, I created, Prompt:, or any explanation.';
+}
+function ctxEstimateNow() {
+  const input = document.getElementById('chatInput');
+  const curInput = input ? input.value.trim() : '';
+  // 历史：与 sendMessage 相同的拼装
+  const historyRounds = parseInt(document.getElementById('s_history_rounds').value) || 0;
+  let histText = '';
+  if (historyRounds > 0 && chatHistory.length >= 2) {
+    const recent = chatHistory.slice(-(historyRounds * 2));
+    histText = recent.map(m => (m.role === 'user' ? '用户: ' : '助手: ') + m.content).join('\n');
+  }
+  const sys = ctxSystemPrompt();
+  return _estTokens(sys) + _estTokens(histText) + _estTokens(curInput);
+}
+function updateCtxBar() {
+  const bar = document.getElementById('ctxBar');
+  if (!bar) return;
+  const total = parseInt(document.getElementById('s_llm_context_tokens').value) || 0;
+  const histRounds = parseInt(document.getElementById('s_history_rounds').value) || 0;
+  // 未配置窗口 或 历史轮数为 0（每轮全新对话，无可视上下文预算）→ 隐藏
+  if (!total || histRounds <= 0) { bar.classList.add('hidden'); return; }
+  const used = ctxEstimateNow();
+  const pct = Math.min(100, Math.round(used / total * 100));
+  const fill = document.getElementById('ctxFill');
+  const txt = document.getElementById('ctxText');
+  fill.style.width = pct + '%';
+  fill.className = 'ctx-fill' + (pct >= 90 ? ' ctx-danger' : (pct >= 60 ? ' ctx-warn' : ''));
+  const fmt = n => n >= 1000 ? (n/1000).toFixed(1)+'k' : String(n);
+  txt.textContent = `约 ${fmt(used)} / ${fmt(total)} tok (${pct}%)`;
+  const sysN = _estTokens(ctxSystemPrompt());
+  const curN = _estTokens((document.getElementById('chatInput')||{}).value || '');
+  const histN = Math.max(0, used - sysN - curN);
+  bar.title = `估算发送内容占上下文窗口比例\n系统提示 约${fmt(sysN)} · 历史 约${fmt(histN)} · 当前输入 约${fmt(curN)}\n\n实际窗口大小可在配置页「LLM 上下文窗口」调整`;
+}
+
 // ================= 发送 =================
 async function sendMessage() {
   if (isGenerating) return;
@@ -941,6 +1023,7 @@ async function sendMessage() {
       if (result.search && result.search.query) parts.push(result.search.query);
       if (parts.length) _endProgress(true, parts.join(' · '));
       else _endProgress(true, '生成完成');
+      updateCtxBar();
     } else { throw new Error(failed ? failed.error : '未收到完成事件'); }
   } catch(e) {
     rollbackLast();
@@ -1009,12 +1092,15 @@ function rollbackLast() {
   chatLog.pop(); chatHistory.pop(); saveChatLog();
   const all = document.querySelectorAll('#chatMessages .chat-bubble');
   if (all.length) all[all.length-1].remove();
+  updateCtxBar();
 }
 
 // Enter 发送
 document.getElementById('chatInput').addEventListener('keydown', function(e) {
   if (e.key==='Enter' && !e.shiftKey && !isGenerating) { e.preventDefault(); sendMessage(); }
 });
+// 输入变化 → 实时刷新上下文进度条
+document.getElementById('chatInput').addEventListener('input', updateCtxBar);
 // 角色框 Enter 也发送
 document.getElementById('chat_role').addEventListener('keydown', function(e) {
   if (e.key==='Enter' && !isGenerating) { e.preventDefault(); sendMessage(); }
@@ -1052,8 +1138,10 @@ async function loadSettings(silent) {
       $('s_gen_width').value = s.gen_width??896;
       $('s_gen_height').value = s.gen_height??1152;
       $('s_history_rounds').value = s.history_rounds??2;
+      $('s_llm_context_tokens').value = s.llm_context_tokens??32768;
       resPresets = parseResPresets(s.resolution_presets);
       renderResPresetEditor(); populateResDropdown();
+      updateCtxBar();  // 上下文窗口值已就绪，刷新进度条
       if (!silent) console.log('settings loaded');
     } else if (!silent) console.warn('settings load failed', d);
   } catch(e) { if (!silent) console.warn('settings load error', e); }
@@ -1080,6 +1168,7 @@ async function saveSettings() {
     gen_height: parseInt($('s_gen_height').value)||1152,
     resolution_presets: resPresets,
     history_rounds: parseInt($('s_history_rounds').value)||0,
+    llm_context_tokens: parseInt($('s_llm_context_tokens').value)||32768,
   };
   try {
     const r = await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});

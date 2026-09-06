@@ -331,6 +331,27 @@ body {
   flex-shrink: 0; padding: 6px 0 12px;
   border-top: 1px solid var(--border-soft); margin-top: 4px;
 }
+
+/* ---- LLM 上下文使用量进度条 ---- */
+.ctx-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 2px 2px 8px; font-size: .72rem; color: var(--text-faint);
+  user-select: none;
+}
+.ctx-label { flex-shrink: 0; font-weight: 600; }
+.ctx-track {
+  flex: 1; height: 6px; border-radius: 4px;
+  background: var(--bg-elev-2); border: 1px solid var(--border-soft);
+  overflow: hidden;
+}
+.ctx-fill {
+  height: 100%; width: 0%;
+  background: var(--green); border-radius: 4px;
+  transition: width .25s ease, background .25s ease;
+}
+.ctx-fill.ctx-warn { background: var(--amber); }
+.ctx-fill.ctx-danger { background: var(--red); }
+.ctx-text { flex-shrink: 0; font-family: Consolas, Menlo, monospace; min-width: 96px; text-align: right; }
 .chat-input-row { display: flex; gap: 8px; align-items: stretch; }
 .textarea-wrap {
   flex: 1; position: relative; display: flex;

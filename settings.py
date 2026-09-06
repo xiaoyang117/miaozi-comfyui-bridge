@@ -62,6 +62,8 @@ DEFAULT_SETTINGS = {
     # ---- 对话 ----
     # 历史上下文轮数：每轮=1条用户消息+1条助手回复；0 表示每次全新对话
     "history_rounds": 2,
+    # LLM 上下文窗口大小(token)：用于前端估算上下文使用量进度条
+    "llm_context_tokens": 32768,
 }
 
 _settings_lock = threading.RLock()
@@ -216,6 +218,10 @@ class Settings:
     @property
     def history_rounds(self) -> int:
         return _to_int(self._data.get("history_rounds", 2), 2)
+
+    @property
+    def llm_context_tokens(self) -> int:
+        return _to_int(self._data.get("llm_context_tokens", 32768), 32768)
 
 
 def _to_int(value, default: int) -> int:
