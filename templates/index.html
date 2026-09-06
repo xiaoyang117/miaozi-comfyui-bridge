@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
 <title>喵梓二号 · ComfyUI 生图助手</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -24,26 +24,26 @@
   <div id="panel-chat" class="panel active">
     <!-- 顶部操作条 -->
     <div class="chat-toolbar">
-      <div class="toolbar-group">
+      <div class="toolbar-group tb-search">
         <label class="toggle-label" title="启用后会在生图前搜索角色特征标签作为参考">
           <input type="checkbox" id="useSearch" checked>
           <span class="toggle-slider"></span>角色搜索
         </label>
       </div>
       <div class="toolbar-sep"></div>
-      <div class="toolbar-group">
+      <div class="toolbar-group tb-workflow">
         <select id="chat_workflow" title="选择工作流"></select>
       </div>
       <div class="toolbar-sep"></div>
-      <div class="toolbar-group chat-resolution">
+      <div class="toolbar-group chat-resolution tb-resolution">
         <select id="chat_resolution" title="选择输出分辨率"></select>
         <button class="btn-secondary btn-res-manage" onclick="openResManager()" title="管理可用尺寸">⚙ 尺寸</button>
       </div>
-      <div class="toolbar-sep"></div>
-      <div class="toolbar-group" style="margin-left:auto">
-        <input type="text" id="chat_role" placeholder="角色标签(可选): shiroko, blue_archive" title="手动指定角色（英文标签/中文名），可跳过角色识别" style="min-width:220px">
+      <div class="toolbar-break" aria-hidden="true"></div>
+      <div class="toolbar-group tb-role">
+        <input type="text" id="chat_role" placeholder="角色标签(可选): shiroko, blue_archive" title="手动指定角色（英文标签/中文名），可跳过角色识别">
       </div>
-      <div class="toolbar-group">
+      <div class="toolbar-group tb-clear">
         <button class="btn-secondary btn-danger" onclick="clearChatLog()">清空记录</button>
       </div>
     </div>

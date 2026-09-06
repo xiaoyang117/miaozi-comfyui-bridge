@@ -163,6 +163,12 @@ body {
 .btn-res-manage {
   padding: 7px 10px; font-size: .78rem; white-space: nowrap;
 }
+/* 桌面端：角色标签组推到最右 + 角色框最小宽度（原内联样式移入样式表，
+   便于移动端 @media 覆盖） */
+.tb-role { margin-left: auto; }
+#chat_role { min-width: 220px; }
+/* 移动端强制换行占位，桌面隐藏 */
+.toolbar-break { display: none; }
 
 .chat-messages {
   flex: 1; overflow-y: auto; padding: 6px 2px 12px;
@@ -531,19 +537,65 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 
 /* ============ 响应式 ============ */
 @media (max-width: 680px) {
-  .container { padding: 0 10px; }
+  /* 容器：动态视口高度避免移动端地址栏遮挡；底部预留刘海屏安全区 */
+  .container { padding: 0 10px; height: 100dvh; padding-bottom: env(safe-area-inset-bottom, 0px); }
+  body { padding-bottom: env(safe-area-inset-bottom, 0px); }
+
   .header { padding-top: 10px; }
   .header h1 { font-size: 1.15rem; }
   .header h1 small { display: none; }
-  .tab { padding: 6px 16px; font-size: .8rem; }
-  .chat-bubble { max-width: 92%; font-size: .85rem; }
-  .chat-toolbar { gap: 6px; padding: 8px 10px; }
-  .toolbar-group { gap: 4px; flex-wrap: wrap; }
-  .settings-row { flex-direction: column; gap: 0; }
-  .chat-input-row .send-btn { padding: 11px 18px; }
-  .chat-toggle-row select { max-width: 130px; }
-  .chat-resolution select { font-size: .72rem; padding: 2px 6px; }
-  .search-url-switch select { font-size: .72rem; padding: 2px 6px; max-width: 100px; }
-  #chat_role { min-width: 0; width: 100%; font-size: .78rem; padding: 6px 10px; }
-  .action-btn { font-size: .72rem; padding: 5px 10px; }
+
+  /* tabs：4 个按钮均分剩余宽度，与标题同行不挤压 */
+  .tabs { flex: 1 1 auto; margin-left: 10px; }
+  .tab { padding: 8px 10px; font-size: .82rem; flex: 1; text-align: center; }
+
+  /* 气泡：手机略放宽 */
+  .chat-bubble { max-width: 92%; font-size: .9rem; }
+
+  /* ===== 工具栏两行堆叠 ===== */
+  .chat-toolbar { gap: 8px; padding: 8px 10px; }
+  .toolbar-sep { display: none; }
+  .chat-toolbar .tb-search    { order: 1; }
+  .chat-toolbar .tb-workflow  { order: 2; }
+  .chat-toolbar .tb-resolution{ order: 3; }
+  .chat-toolbar .toolbar-break {
+    display: block; order: 4; flex-basis: 100%;
+    height: 0; margin: 0; padding: 0; border: 0;
+  }
+  .chat-toolbar .tb-role  { order: 5; flex: 1 1 auto; margin-left: 0; }
+  .chat-toolbar .tb-clear { order: 6; flex: 0 0 auto; }
+
+  /* 表单控件统一 16px：修复 iOS 聚焦自动缩放（原 .72/.78rem 会触发缩放） */
+  select, input[type="text"], input[type="password"], input[type="number"], textarea { font-size: 16px; }
+  #chat_role { min-width: 0; width: 100%; padding: 10px 12px; }
+  .chat-resolution select { padding: 10px 12px; max-width: 160px; }
+
+  /* 设置：竖排 + 间距更可读 */
+  .settings-row { flex-direction: column; gap: 12px; }
+  .source-row { flex-wrap: wrap; }
+  .source-row .source-name { max-width: 100%; flex: 1 1 100%; }
+
+  /* 输入区按钮更舒适 */
+  .chat-input-row .send-btn { padding: 12px 20px; font-size: 1rem; }
+  .textarea-wrap textarea { min-height: 46px; }
+
+  /* 桌面快捷键提示在手机无意义，隐藏省空间 */
+  .kbd-hint { display: none; }
+
+  .action-btn { font-size: .78rem; padding: 8px 12px; }
+
+  /* 任务缩略图在小屏缩小 */
+  .task-thumb, .task-thumb-empty { width: 56px; height: 56px; }
+
+  /* 图片放大弹窗：受安全区约束，关闭按钮不被状态栏遮住 */
+  .modal-image { max-height: calc(100vh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); }
+  .modal-close-btn { top: calc(env(safe-area-inset-top, 0px) + 6px); }
+}
+
+/* ============ 极窄屏 ============ */
+@media (max-width: 420px) {
+  .header { flex-direction: column; align-items: stretch; gap: 10px; }
+  .header h1 { font-size: 1.05rem; }
+  .tabs { width: 100%; margin-left: 0; }
+  .tab { padding: 9px 4px; font-size: .8rem; }
 }
