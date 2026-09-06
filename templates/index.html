@@ -501,6 +501,8 @@ function closeResManager() { document.getElementById('resManager').classList.add
 // ================= 角色候选选择（发送前预检弹卡） =================
 let roleChoiceResolve = null;  // Promise resolve（用户选择后回调）
 function askRoleChoice(candidates, hintText) {
+  // 保险：先确保没有残留的未决弹窗（防上次 promise 悬挂）
+  if (roleChoiceResolve) { const old = roleChoiceResolve; roleChoiceResolve = null; old(undefined); }
   document.getElementById('roleChoiceHint').textContent = hintText || '';
   const box = document.getElementById('roleChoiceList');
   box.innerHTML = '';
@@ -518,6 +520,9 @@ function askRoleChoice(candidates, hintText) {
     row.onclick = () => { closeRoleChoiceModal(c.character); };
     box.appendChild(row);
   });
+  // 等待期间给按钮明确提示，避免用户以为卡住
+  const btn = document.getElementById('chatSendBtn');
+  if (btn) btn.textContent = '🎭 请选择角色…';
   document.getElementById('roleChoiceModal').classList.remove('hidden');
   return new Promise((resolve) => { roleChoiceResolve = resolve; });
 }
@@ -526,6 +531,8 @@ function roleChoiceSkip() {   // 不选角色，直接生成（返回 undefined 
 }
 function closeRoleChoiceModal(result) {
   document.getElementById('roleChoiceModal').classList.add('hidden');
+  const btn = document.getElementById('chatSendBtn');
+  if (btn && !btn.disabled) btn.textContent = '生成';
   if (roleChoiceResolve) { const r = roleChoiceResolve; roleChoiceResolve = null; r(result); }
 }
 function esc(s) {
@@ -1005,7 +1012,7 @@ async function sendMessage() {
     try {
       const preRes = await fetch('/api/resolve/role', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ prompt: promptText }),
+        body: JSON.stringify({ prompt: text }),   // 只用本条输入识别角色，历史不干扰
       });
       const pre = await preRes.json();
       if (pre && pre.success && pre.need_choice && pre.candidates) {
@@ -1021,7 +1028,11 @@ async function sendMessage() {
         if (chosen) roleTag = chosen;   // 选定角色 slug（仅本轮）
         // chosen === undefined（"不选角色"）→ 不填 role，走后端默认
       }
-    } catch(e) { console.warn('角色预检跳过:', e); }
+    } catch(e) {
+      console.warn('角色预检失败:', e);
+      // 预检失败不阻断发送，但告知（便于排查）
+      showModal('角色预检失败（已跳过，继续生成）: ' + (e && e.message || e), '');
+    }
   }
 
   chatHistory.push({ role:'user', content:text });

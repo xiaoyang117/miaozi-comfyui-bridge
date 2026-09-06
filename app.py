@@ -1041,9 +1041,12 @@ def api_resolve_role():
                 "trigger": (d.get("trigger") or "")[:120],
                 "core_head": head,
             })
+        # need_choice: 仅当存在【跨作品】候选才弹卡（如舰C长门 vs 碧蓝长门）；
+        # 同一作品下的皮肤变体(azur_lane 的三个 nagato skin)不弹，自动取第一个。
+        unique_cps = {d.get("copyright") for d in (cands or [])}
         return jsonify({"success": True, "prompt": text,
                         "candidates": items,
-                        "need_choice": len(items) > 1})
+                        "need_choice": len(unique_cps) > 1})
     except Exception as e:
         log.error("[resolve/role] %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
