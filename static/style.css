@@ -560,6 +560,25 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   opacity: .8; transition: all .15s; border-radius: 8px; }
 .modal-close-btn:hover { opacity: 1; background: rgba(255,255,255,.12); }
 
+/* 角色候选选择卡片 */
+.role-choice-card {
+  display: block; width: 100%; text-align: left;
+  padding: 10px 14px; margin: 0;
+  background: var(--bg-elev-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 10px;
+  font-size: .85rem; cursor: pointer; transition: all .15s;
+}
+.role-choice-card:hover { border-color: var(--accent);
+  background: var(--accent-soft); }
+.role-choice-main { display: flex; align-items: baseline; gap: 8px;
+  flex-wrap: wrap; }
+.role-choice-name { font-weight: 700; font-size: .9rem; }
+.role-choice-work { color: var(--text-dim); font-size: .78rem; }
+.role-choice-tags { color: var(--text-faint); font-size: .72rem;
+  margin-top: 4px; line-height: 1.5;
+  overflow: hidden; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+
 .hidden { display: none !important; }
 
 /* 快捷键提示小角标 */

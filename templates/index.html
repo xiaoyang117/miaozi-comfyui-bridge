@@ -314,6 +314,23 @@
   </div>
 </div>
 
+<!-- ================= 角色候选选择弹窗 ================= -->
+<div id="roleChoiceModal" class="modal-overlay hidden">
+  <div class="modal-box" style="max-width:560px" onclick="event.stopPropagation()">
+    <div class="modal-header modal-success" style="justify-content:space-between">
+      <span>🎭 识别到多个角色，选一个继续</span>
+      <button class="modal-close-btn" style="position:static;color:inherit" onclick="closeRoleChoiceModal(null)">✕</button>
+    </div>
+    <div class="modal-body" style="padding:12px 16px;white-space:normal">
+      <div class="field-hint" style="margin-bottom:10px" id="roleChoiceHint"></div>
+      <div id="roleChoiceList" class="source-list" style="gap:8px"></div>
+      <div class="btn-inline-row" style="margin-top:12px">
+        <button class="btn-secondary" onclick="roleChoiceSkip()">不选角色，直接生成</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 // ================= 标签页 =================
 function switchTab(name) {
@@ -480,6 +497,41 @@ function openResManager() {
   document.getElementById('resManager').classList.remove('hidden');
 }
 function closeResManager() { document.getElementById('resManager').classList.add('hidden'); }
+
+// ================= 角色候选选择（发送前预检弹卡） =================
+let roleChoiceResolve = null;  // Promise resolve（用户选择后回调）
+function askRoleChoice(candidates, hintText) {
+  document.getElementById('roleChoiceHint').textContent = hintText || '';
+  const box = document.getElementById('roleChoiceList');
+  box.innerHTML = '';
+  candidates.forEach((c, i) => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'role-choice-card';
+    const cn = (c.copyright_name || c.copyright || '').replace(/_/g, ' ');
+    row.innerHTML =
+      '<div class="role-choice-main">' +
+        '<span class="role-choice-name">' + esc(c.character) + '</span>' +
+        (cn ? '<span class="role-choice-work">『' + esc(cn) + '』</span>' : '') +
+      '</div>' +
+      (c.core_head ? '<div class="role-choice-tags">' + esc(c.core_head) + '</div>' : '');
+    row.onclick = () => { closeRoleChoiceModal(c.character); };
+    box.appendChild(row);
+  });
+  document.getElementById('roleChoiceModal').classList.remove('hidden');
+  return new Promise((resolve) => { roleChoiceResolve = resolve; });
+}
+function roleChoiceSkip() {   // 不选角色，直接生成（返回 undefined 继续）
+  closeRoleChoiceModal(undefined);
+}
+function closeRoleChoiceModal(result) {
+  document.getElementById('roleChoiceModal').classList.add('hidden');
+  if (roleChoiceResolve) { const r = roleChoiceResolve; roleChoiceResolve = null; r(result); }
+}
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;')
+    .replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
 function renderResManager() {
   const box = document.getElementById('resManagerList');
   box.innerHTML = '';
@@ -935,6 +987,42 @@ async function sendMessage() {
   const hasImage = selectedImages.length > 0;
   const imageData = selectedImages.slice();
   const res = currentResolution();
+  const useSearch = document.getElementById('useSearch').checked;
+  const wfSel = document.getElementById('chat_workflow');
+  const wfPath = wfSel.value || '';
+  const historyRounds = parseInt(document.getElementById('s_history_rounds').value) || 0;
+  let promptText = text;
+  if (historyRounds > 0 && chatHistory.length >= 2) {
+    const recent = chatHistory.slice(-(historyRounds*2));
+    const ctx = recent.map(m => (m.role==='user'?'用户: ':'助手: ')+m.content).join('\n');
+    promptText = '历史对话:\n'+ctx+'\n\n用户当前输入: '+text;
+  }
+  let roleTag = document.getElementById('chat_role').value.trim();
+  // 发送前角色预检：开角色搜索、没手动填角色、且不是图片识别场景时，
+  // 先规则层识别，若多个候选则弹卡让用户确定用哪个（避免 LLM 猜错/多候选干扰）。
+  // 在 push 气泡前执行——用户取消时不留痕迹。
+  if (useSearch && !roleTag && !hasImage) {
+    try {
+      const preRes = await fetch('/api/resolve/role', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ prompt: promptText }),
+      });
+      const pre = await preRes.json();
+      if (pre && pre.success && pre.need_choice && pre.candidates) {
+        const chosen = await askRoleChoice(
+          pre.candidates,
+          '检测到多个角色，选一个作为本次生成的角色参考：');
+        if (chosen === null) {           // ✕ = 取消整次发送
+          isGenerating = false;
+          sendBtn.disabled = false; sendBtn.textContent = '生成';
+          input.focus();
+          return;
+        }
+        if (chosen) roleTag = chosen;   // 选定角色 slug（仅本轮）
+        // chosen === undefined（"不选角色"）→ 不填 role，走后端默认
+      }
+    } catch(e) { console.warn('角色预检跳过:', e); }
+  }
 
   chatHistory.push({ role:'user', content:text });
   chatLog.push({ role:'user', text, hasImage });
@@ -944,19 +1032,7 @@ async function sendMessage() {
   _beginProgress();  // 对话内临时进度气泡（不留存）
 
   try {
-    const useSearch = document.getElementById('useSearch').checked;
-    const wfSel = document.getElementById('chat_workflow');
-    const wfPath = wfSel.value || '';
-    const historyRounds = parseInt(document.getElementById('s_history_rounds').value) || 0;
-    let promptText = text;
-    if (historyRounds > 0 && chatHistory.length >= 2) {
-      const recent = chatHistory.slice(-(historyRounds*2));
-      const ctx = recent.map(m => (m.role==='user'?'用户: ':'助手: ')+m.content).join('\n');
-      promptText = '历史对话:\n'+ctx+'\n\n用户当前输入: '+text;
-    }
-
     let response;
-    const roleTag = document.getElementById('chat_role').value.trim();
     // 连接建立超时：仅当服务完全无响应（挂死）时才中止，不因生成慢/排队而误杀。
     // 放宽到 10 分钟；一旦收到任何响应立即清除。
     const fetchCtrl = new AbortController();

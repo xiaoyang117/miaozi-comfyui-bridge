@@ -231,6 +231,17 @@ def _fmt_candidates(cands: list) -> str:
     return "\n".join(lines)
 
 
+def _fmt_best_candidate(d: dict) -> str:
+    """只格式化最匹配的那个角色（供 LLM/复选参考，避免多候选互相干扰）。"""
+    lines = [f"角色: {d['character']} | 作品: {d['copyright']} "
+             f"| 触发词: {d.get('trigger', '')}"]
+    core = d.get("core_tags") or ""
+    tags = [t.strip() for t in core.split(",") if t.strip()]
+    if tags:
+        lines.append(f"特征标签: {', '.join(tags[:80])}")
+    return "\n".join(lines)
+
+
 def _looks_like_tag(s: str) -> bool:
     """判断字符串是否为纯 danbooru 标签样式（英文/数字/下划线/括号/逗号）。"""
     import re as _re
@@ -674,6 +685,7 @@ def _run_generation(data: dict):
         # ---------- Step 1: 角色识别（规则优先，LLM 兜底） ----------
         search_info = None
         raw = None
+        best_ref = None   # 最匹配角色的参考文本（喂模型用，避免多候选干扰）
         char_core_tags = ""   # 命中角色的 core_tags（供标签选词召回）
         role_hint = (data.get("role") or "").strip()
         if use_search:
@@ -732,8 +744,9 @@ def _run_generation(data: dict):
 
                 # (3) 组装结果
                 if cands:
-                    raw = _fmt_candidates(cands)
+                    raw = _fmt_candidates(cands)      # 多候选：界面展示用
                     best = cands[0]
+                    best_ref = _fmt_best_candidate(best)  # 单候选：模型参考用
                     char_core_tags = best.get("core_tags", "") or ""
                     search_info = {
                         "query": best.get("character", ""),
@@ -776,8 +789,9 @@ def _run_generation(data: dict):
             try:
                 # 第一步：先自由生成"草稿"（带标签风格引导）
                 draft = None
-                if search_info and raw:
-                    ctx = f"角色参考资料:\n{raw}\n\n用户需求: {user_input}"
+                if search_info and best_ref:
+                    # 只给最匹配的那个角色参考，避免多候选特征互相干扰
+                    ctx = f"角色参考资料:\n{best_ref}\n\n用户需求: {user_input}"
                     draft = llm._call(PROMPT_WITH_CONTEXT_SPECIFIC,
                                       ctx, history)
                 else:
@@ -996,6 +1010,45 @@ def _generation_with_task(data: dict, source: str):
 # ====================================================================== #
 # 生成接口：SSE 流（供前端） + 同步 JSON（供外部程序）
 # ====================================================================== #
+@app.route("/api/resolve/role", methods=["POST"])
+def api_resolve_role():
+    """发送前角色预检：仅规则层识别（不调 LLM），返回候选列表供前端弹卡。
+
+    body: {prompt, role?}  role 存在则只解析手动指定（不展开多候选）。
+    返回 {success, prompt, candidates: [{character, copyright, trigger,
+    core_head, via}], need_choice: bool}
+    """
+    data = request.get_json() or {}
+    text = (data.get("prompt") or "").strip()
+    role = (data.get("role") or "").strip()
+    if not text and not role:
+        return jsonify({"success": False, "error": "缺少文本"}), 400
+    try:
+        if role:
+            cands = char_resolver.resolve_from_text(role, strict=True)
+        else:
+            cands = char_resolver.resolve_from_text(text)
+        items = []
+        for d in (cands or [])[:5]:
+            core = (d.get("core_tags") or "")
+            head = ", ".join([t.strip() for t in core.split(",")
+                              if t.strip()][:12])
+            items.append({
+                "character": d.get("character", ""),
+                "copyright": d.get("copyright", ""),
+                "name": d.get("name", ""),
+                "copyright_name": d.get("copyright_name", ""),
+                "trigger": (d.get("trigger") or "")[:120],
+                "core_head": head,
+            })
+        return jsonify({"success": True, "prompt": text,
+                        "candidates": items,
+                        "need_choice": len(items) > 1})
+    except Exception as e:
+        log.error("[resolve/role] %s", e)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/api/generate", methods=["POST"])
 def generate():
     if not _gen_lock.acquire(blocking=False):
