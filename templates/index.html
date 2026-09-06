@@ -143,6 +143,24 @@
       <input id="s_workflow_path" placeholder="MIAOMIAO 1.json">
     </div>
 
+    <!-- 工作流文件编辑器 -->
+    <div class="settings-group">
+      <h3>工作流文件编辑器</h3>
+      <div class="wf-edit-row">
+        <select id="wf_edit_file" title="选择要编辑的工作流文件"></select>
+        <button class="btn-secondary" onclick="wfEditLoad()">📂 加载</button>
+        <button class="btn-secondary" onclick="wfEditRefreshList()">↻</button>
+      </div>
+      <textarea id="wf_edit_content" rows="18" spellcheck="false"
+        placeholder="选择上方工作流文件后点击「加载」，在此编辑 JSON…&#10;保存前会校验 JSON 格式，工作流必须是 JSON 对象。"></textarea>
+      <div class="btn-inline-row">
+        <button onclick="wfEditSave(false)">💾 保存（覆盖当前）</button>
+        <button class="btn-secondary" onclick="wfEditSave(true)">📄 另存为新文件</button>
+      </div>
+      <p class="field-hint" id="wf_edit_status"></p>
+      <p class="field-hint">⚠️ 覆盖保存会直接改写 workflows/ 下的原文件；建议修改前先「另存为新文件」留底。</p>
+    </div>
+
     <!-- 分辨率 -->
     <div class="settings-group">
       <h3>默认分辨率</h3>
@@ -727,6 +745,87 @@ async function loadWorkflowList() {
   restoreWfSelection();  // 重建后恢复上次选择
 }
 
+// ================= 工作流编辑器 =================
+let wfEditCurrent = '';   // 当前已加载的文件名
+async function wfEditRefreshList() {
+  const sel = document.getElementById('wf_edit_file');
+  const cur = sel.value || wfEditCurrent;
+  try {
+    const r = await fetch('/api/workflows'); const d = await r.json();
+    sel.innerHTML = '';
+    if (d.success && d.workflows.length) {
+      d.workflows.forEach(wf => {
+        const o = document.createElement('option');
+        o.value = wf.name; o.textContent = wf.name;
+        sel.appendChild(o);
+      });
+      if (cur && [...sel.options].some(o => o.value === cur)) sel.value = cur;
+      // 同步刷新聊天栏工作流下拉（新文件立即可选）
+      if (typeof loadWorkflowList === 'function') loadWorkflowList();
+    } else {
+      sel.innerHTML = '<option value="">（无工作流文件）</option>';
+    }
+  } catch(e) {
+    const st = document.getElementById('wf_edit_status');
+    if (st) st.textContent = '❌ 加载文件列表失败: ' + e.message;
+  }
+}
+async function wfEditLoad() {
+  const sel = document.getElementById('wf_edit_file');
+  const name = sel.value;
+  const st = document.getElementById('wf_edit_status');
+  const box = document.getElementById('wf_edit_content');
+  if (!name) { if (st) st.textContent = '⚠️ 请先选择工作流文件'; return; }
+  st.textContent = '⏳ 加载中…';
+  try {
+    const r = await fetch('/api/workflows/' + encodeURIComponent(name));
+    const d = await r.json();
+    if (!d.success) { st.textContent = '❌ ' + (d.error||'加载失败'); return; }
+    // 美化格式展示
+    try { box.value = JSON.stringify(JSON.parse(d.content), null, 2); }
+    catch { box.value = d.content; }
+    wfEditCurrent = name;
+    st.textContent = `📂 已加载: ${name}（点击「保存」覆盖，或「另存为」新文件）`;
+    st.style.color = '';
+  } catch(e) { st.textContent = '❌ 加载失败: ' + e.message; }
+}
+async function wfEditSave(asNew) {
+  const box = document.getElementById('wf_edit_content');
+  const st = document.getElementById('wf_edit_status');
+  const content = box.value.trim();
+  if (!content) { st.textContent = '⚠️ 内容为空'; return; }
+  // 前端预校验 JSON
+  let parsed;
+  try { parsed = JSON.parse(content); }
+  catch(e) { st.textContent = '❌ JSON 格式错误: ' + e.message; return; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    st.textContent = '❌ 工作流必须是 JSON 对象（{...}）'; return;
+  }
+
+  let name = wfEditCurrent;
+  if (asNew) {
+    const newName = prompt('另存为新文件名（.json）:', (name || 'workflow').replace(/\.json$/, '') + '_copy.json');
+    if (!newName) return;
+    name = newName.trim();
+    if (!/\.json$/.test(name)) name += '.json';
+  }
+  if (!name) { st.textContent = '⚠️ 请先加载一个工作流文件'; return; }
+
+  st.textContent = '⏳ 保存中…';
+  try {
+    const r = await fetch('/api/workflows/save', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ name: wfEditCurrent, content, new_name: asNew ? name : undefined }),
+    });
+    const d = await r.json();
+    if (!d.success) { st.textContent = '❌ ' + (d.error||'保存失败'); return; }
+    wfEditCurrent = d.name;
+    st.textContent = '✅ ' + (d.message || '已保存');
+    st.style.color = '#86efac';
+    wfEditRefreshList();  // 刷新列表（新文件出现）
+  } catch(e) { st.textContent = '❌ 保存失败: ' + e.message; }
+}
+
 // ================= 发送 =================
 async function sendMessage() {
   if (isGenerating) return;
@@ -1157,6 +1256,7 @@ document.getElementById('chat_workflow').addEventListener('change', saveWfSelect
 document.getElementById('chat_resolution').addEventListener('change', saveResSelection);
 loadSettings();
 loadWorkflowList();
+wfEditRefreshList();  // 填充配置页工作流编辑器文件列表
 restoreChatLog();
 </script>
 </body>

@@ -426,6 +426,75 @@ def api_workflows():
     return jsonify({"success": True, "workflows": items})
 
 
+def _safe_wf_name(name: str):
+    """校验工作流文件名：仅允许 .json 结尾的合法文件名，防路径穿越。返回文件名或 None。"""
+    name = (name or "").strip()
+    if not name or not name.endswith(".json"):
+        return None
+    if name != name.replace("\\", "/").split("/")[-1]:
+        return None  # 含路径分隔符
+    if name in (".", "..", "") or any(ch in name for ch in '<>:"|?*'):
+        return None
+    return name
+
+
+@app.route("/api/workflows/<path:name>", methods=["GET"])
+def api_workflow_get(name):
+    """读取单个工作流文件内容。"""
+    fname = _safe_wf_name(name)
+    if not fname:
+        return jsonify({"success": False, "error": "非法文件名"}), 400
+    p = WORKFLOWS_DIR / fname
+    if not p.exists():
+        return jsonify({"success": False, "error": f"工作流文件不存在: {fname}"}), 404
+    try:
+        content = p.read_text(encoding="utf-8")
+        return jsonify({"success": True, "name": fname, "content": content})
+    except Exception as e:
+        return jsonify({"success": False, "error": f"读取失败: {e}"}), 500
+
+
+@app.route("/api/workflows/save", methods=["POST"])
+def api_workflow_save():
+    """保存工作流。body: {name: 现有文件名, content: JSON 文本,
+    new_name?: 另存为的新文件名（此时不覆盖原文件）}。"""
+    data = request.get_json() or {}
+    content = data.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return jsonify({"success": False, "error": "内容不能为空"}), 400
+    # 校验是合法 JSON（工作流必须是 JSON）
+    try:
+        parsed = json.loads(content)
+        if not isinstance(parsed, dict):
+            return jsonify({"success": False, "error": "工作流内容必须是 JSON 对象"}), 400
+    except json.JSONDecodeError as e:
+        return jsonify({"success": False, "error": f"JSON 格式错误: {e}"}), 400
+
+    new_name = _safe_wf_name(data.get("new_name"))
+    name = _safe_wf_name(data.get("name"))
+    # 另存：以 new_name 为准；覆盖：name 必须存在
+    if new_name:
+        target = new_name
+    elif name:
+        if not (WORKFLOWS_DIR / name).exists():
+            return jsonify({"success": False, "error": f"原文件不存在: {name}"}), 404
+        target = name
+    else:
+        return jsonify({"success": False, "error": "缺少文件名"}), 400
+
+    try:
+        WORKFLOWS_DIR.mkdir(parents=True, exist_ok=True)
+        p = WORKFLOWS_DIR / target
+        # 用 json.dumps 规范格式写回（保留 ensure_ascii=False）
+        p.write_text(json.dumps(parsed, ensure_ascii=False, indent=2),
+                     encoding="utf-8")
+        return jsonify({"success": True, "name": target,
+                        "message": "已保存 ✅" if target == name
+                                   else f"已另存为 {target}"})
+    except Exception as e:
+        return jsonify({"success": False, "error": f"保存失败: {e}"}), 500
+
+
 @app.route("/api/test/llm", methods=["POST"])
 def test_llm():
     data = request.get_json() or {}

@@ -415,6 +415,16 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .btn-danger:hover { background: var(--red-soft); color: var(--red); border-color: var(--red); }
 .btn-block { width: 100%; }
 
+/* 工作流编辑器 */
+.wf-edit-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.wf-edit-row select { flex: 1; min-width: 0; max-width: none; }
+#wf_edit_content {
+  font-family: Consolas, Menlo, "Courier New", monospace;
+  font-size: .78rem; line-height: 1.5; white-space: pre;
+  resize: vertical;
+}
+#wf_edit_status { min-height: 1.2em; margin-top: 6px; }
+
 /* ============ 设置面板 ============ */
 .settings-head { display: flex; gap: 10px; margin-bottom: 14px; }
 .settings-head button { flex: 1; }
