@@ -106,7 +106,10 @@ python character_lookup/import_zh_names.py <数据集文件或目录>
 ## 🔌 OpenAI 兼容接口
 
 服务内置 **OpenAI Images API 兼容层**，任何标准 OpenAI 客户端（Python / JS / curl 等）
-只需把 `base_url` 指向本服务即可直接调用生图，完全复用角色的中文识别 + 本地角色库增强。
+只需把 `base_url` 指向本服务即可直接调用生图。
+**默认完全绕过 LLM**：prompt 视为标准 danbooru 标签原样直通 ComfyUI（不依赖 LLM 服务）；
+仅当传入 `role` / `use_search=true` / `raw_prompt=false` 时，才走智能链路
+（本地角色库识别 + LLM 生成提示词，可输入中文描述）。
 
 ```python
 from openai import OpenAI
@@ -125,20 +128,19 @@ resp = client.images.generate(
 )
 print(resp.data[0].url)
 
-# 启用本地角色库增强：传私有扩展参数
+# 启用本地角色库增强（中文描述 / 角色名均可）：传 role 即自动走智能链路
 resp2 = client.images.generate(
     model="miaozi-image-xl",
     prompt="碧蓝档案的白子 穿泳装",        # 中文描述也可
     role="白子",                          # 手动指定角色（可选）
-    use_search=True,                      # 开启角色搜索（可选）
 )
 
-# 直通模式：已给标准标签，完全跳过 LLM（不依赖 LLM 服务）
+# 直通模式已是默认：prompt 原样提交，完全跳过 LLM；
+# 仅当你显式想关闭直通、强制走 LLM 改写时才传 raw_prompt=False
 resp3 = client.images.generate(
     model="dall-e-3",
     prompt="1girl, shiroko, blue archive, swimsuit, masterpiece",
     size="1024x1024",
-    raw_prompt=True,                      # 原样提交给 ComfyUI，不经过 LLM
 )
 ```
 

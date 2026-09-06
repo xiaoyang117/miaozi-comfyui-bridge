@@ -130,13 +130,15 @@ def register_openai(app, run_generation, settings_obj, gen_lock, outputs_dir):
 
         size = body.get("size") or ""
         wh = _parse_size(size)
-        # 直通模式：prompt 视为标准标签，不做 LLM 改写 / 角色搜索
-        raw_prompt = bool(body.get("raw_prompt", False))
         # 私有扩展字段（OpenAI 客户端不会发，但脚本可用来控制角色识别）
         role = (body.get("role") or "").strip()
-        # OpenAI 的 prompt 通常是完整英文标签，默认不做角色搜索（避免误匹配）；
-        # 传入 role 或 use_search=true 时才启用角色库增强。
-        use_search = bool(body.get("use_search", False)) or bool(role)
+        # 调用方显式要求角色库增强？
+        want_search = bool(body.get("use_search", False)) or bool(role)
+        # 默认完全绕过 LLM/角色库：prompt 视为标准 danbooru 标签原样直通。
+        # 显式传 raw_prompt=false，或传 role / use_search=true 时，
+        # 才自动走智能链路（角色库识别 + LLM 生成提示词）。
+        raw_prompt = bool(body.get("raw_prompt", not want_search))
+        use_search = want_search
         if raw_prompt:
             use_search = False
 
