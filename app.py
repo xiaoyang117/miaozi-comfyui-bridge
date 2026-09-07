@@ -400,6 +400,68 @@ def _scene_pick_range(draft: str | None) -> tuple[int, int]:
     return 10, 16
 
 
+# --------------------------------------------------------------------- #
+# 提示词渲染风格（anima 空格 / danbooru 下划线）
+# Anima/Qwen 系底模训练用小写+空格标签，danbooru 系吃下划线标签。
+# --------------------------------------------------------------------- #
+_KEEP_UNDERSCORE = re.compile(r"^(?:score|quality|year)_[0-9]+$|^year_\d{4}$", re.I)
+
+
+def _anima_segment(seg: str) -> str:
+    """把单个标签段转 Anima 空格格式。
+
+    - 角色名 nagato_(azur_lane) -> nagato (azur lane)
+    - 普通标签 white_hair -> white hair
+    - score_7 / year_2025 等保留下划线
+    """
+    seg = (seg or "").strip()
+    if not seg:
+        return seg
+    # 角色名/版权名形态 xxx_(yyy)[_(zzz)]
+    m = re.fullmatch(
+        r"([a-z0-9][a-z0-9_\-']*?)_\(([a-z0-9_\-]+)\)", seg, re.I)
+    if m:
+        core = m.group(1).replace("_", " ")
+        paren = m.group(2).replace("_", " ")
+        return f"{core} ({paren})"
+    if _KEEP_UNDERSCORE.fullmatch(seg):
+        return seg
+    # 一般标签：下划线 -> 空格（已含空格的保持不变）
+    return seg.replace("_", " ")
+
+
+def _to_render_style(prompt: str, wf_path: str = "") -> str:
+    """内部提示词 -> 最终渲染风格。
+
+    settings.prompt_style:
+      danbooru -> 原样(下划线)
+      anima    -> 强制空格
+      auto     -> 工作流名含 anima/qwen/miao/harem 才转空格
+    """
+    if not prompt:
+        return prompt
+    style = settings.prompt_style
+    if style == "danbooru":
+        return prompt
+    if style == "auto":
+        name = (wf_path or settings.workflow_path or "").lower()
+        if not any(k in name for k in ("anima", "qwen", "miao", "harem")):
+            return prompt
+    # 按 逗号/分号+可选空格 拆分（保留分隔符与后续空格），每段转空格后拼回
+    parts = re.split(r"(,|;)", prompt)
+    out = []
+    for i, p in enumerate(parts):
+        if p in (",", ";"):
+            out.append(p)
+        elif p.strip():
+            # 保留段首空格(分隔符后的排版空格)，用段内容的原始前导空格
+            lead = p[:len(p) - len(p.lstrip())]
+            out.append(lead + _anima_segment(p))
+        else:
+            out.append(p)
+    return "".join(out)
+
+
 def _looks_like_tag(s: str) -> bool:
     """判断字符串是否为纯 danbooru 标签样式（英文/数字/下划线/括号/逗号）。"""
     import re as _re
@@ -1186,6 +1248,8 @@ def _run_generation(data: dict):
                          gid, width, height, size_via)
 
         # ---------- Step 3: ComfyUI（工作线程 + 进度转发） ----------
+        # 提交前统一按底模渲染风格转换提示词(anima 空格/danbooru 下划线)
+        prompt = _to_render_style(prompt, wf_path)
         if auto_resolution:
             yield {"step": "size", "msg": f"📐 尺寸：{width}×{height} ({size_via})"}
         else:

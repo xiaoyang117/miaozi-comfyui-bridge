@@ -35,6 +35,10 @@ DEFAULT_SETTINGS = {
     # 一般无需手动配置；仅在自动探测失效时手动指定。
     "save_node_id": "",
 
+    # 提示词渲染风格：danbooru 系底模吃下划线标签；Qwen/Anima 系吃空格标签。
+    # auto=按工作流文件名猜测(含 anima/miao/qwen 转空格)；anima=强制空格；danbooru=下划线
+    "prompt_style": "auto",
+
     # ---- 尺寸占位符（用于提示词内联指定宽高，可选）----
     "width_placeholder": "chang",
     "height_placeholder": "gao",
@@ -174,6 +178,11 @@ class Settings:
     @property
     def save_node_id(self) -> str:
         return str(self._data.get("save_node_id", ""))
+
+    @property
+    def prompt_style(self) -> str:
+        """danbooru(下划线) / anima(空格) / auto(按工作流猜)。"""
+        return str(self._data.get("prompt_style", "auto")).lower()
 
     @property
     def width_placeholder(self) -> str:
