@@ -207,8 +207,8 @@
       <h3>对话</h3>
       <div class="settings-row">
         <div>
-          <label>历史上下文轮数</label>
-          <input id="s_history_rounds" type="number" min="0" max="20">
+          <label>历史上下文轮数（上限）</label>
+          <input id="s_history_rounds" type="number" min="0" max="20" title="历史最多回溯多少轮；实际轮数会按 token 预算自动适配（窗口减去系统提示/当前输入/输出预留后能塞多少带多少）。0=每次全新对话">
         </div>
         <div>
           <label>LLM 上下文窗口 (token)</label>
@@ -951,16 +951,48 @@ function ctxSystemPrompt() {
   // 后端默认英文系统提示词（PROMPT_SYSTEM_SPECIFIC，无角色时 PROMPT_SYSTEM）
   return 'You are a prompt generator. Must include: character full name, source/work name, hair color, eye color, body type, and detailed visual features (clothing, accessories). Output ONLY the prompt. No greetings, no notes, no labels, no markdown, no JSON, no quotes. Do NOT include phrases like Here is, I created, Prompt:, or any explanation.';
 }
+// 按 token 预算自适应挑选历史轮数，并拼成"用户:…/助手:…"文本。
+// 预算 = 窗口 − 系统提示 − 当前输入 − 输出预留(15%)；
+// 轮数上限 = historyRounds（0 = 不带历史）。sendMessage 与进度条共用本函数。
+function buildHistoryText(curText) {
+  const roundsCap = parseInt(document.getElementById('s_history_rounds').value) || 0;
+  if (roundsCap <= 0 || chatHistory.length < 2) return '';
+  const total = parseInt(document.getElementById('s_llm_context_tokens').value) || 0;
+  // 消息序列：每轮恰好是 [user, assistant] 相邻两条（生成成功才 push assistant）
+  // 从最新往回取"完整的轮"，旧到新拼回
+  const msgs = chatHistory.slice();
+  let idx = msgs.length - 1;
+  // 若末尾是未配对的 user（如正在生成），丢弃它，只数完整轮
+  if (msgs[idx] && msgs[idx].role === 'user') idx--;
+  const chosen = [];
+  let budget = total > 0
+    ? Math.max(256, total
+        - _estTokens(ctxSystemPrompt())
+        - _estTokens(curText || '')
+        - Math.round(total * 0.15))
+    : Infinity;
+  let spent = 0;
+  while (idx >= 1 && chosen.length < roundsCap * 2) {
+    const a = msgs[idx], b = msgs[idx - 1];   // b=user, a=assistant
+    if (!a || !b || a.role !== 'assistant' || b.role !== 'user') break;
+    const pair = [
+      (b.role === 'user' ? '用户: ' : '助手: ') + b.content,
+      (a.role === 'user' ? '用户: ' : '助手: ') + a.content,
+    ].join('\n');
+    const addTok = _estTokens(pair) + 12;   // 每轮额外格式开销
+    if (total > 0 && spent + addTok > budget) break;   // 预算不足：停止（丢更旧）
+    chosen.unshift(b, a);   // 保持时间顺序
+    spent += addTok;
+    idx -= 2;
+  }
+  return chosen.map(m => (m.role === 'user' ? '用户: ' : '助手: ') + m.content).join('\n');
+}
+
 function ctxEstimateNow() {
   const input = document.getElementById('chatInput');
   const curInput = input ? input.value.trim() : '';
-  // 历史：与 sendMessage 相同的拼装
-  const historyRounds = parseInt(document.getElementById('s_history_rounds').value) || 0;
-  let histText = '';
-  if (historyRounds > 0 && chatHistory.length >= 2) {
-    const recent = chatHistory.slice(-(historyRounds * 2));
-    histText = recent.map(m => (m.role === 'user' ? '用户: ' : '助手: ') + m.content).join('\n');
-  }
+  // 历史：与 sendMessage 相同的自适应拼装
+  const histText = buildHistoryText(curInput);
   const sys = ctxSystemPrompt();
   return _estTokens(sys) + _estTokens(histText) + _estTokens(curInput);
 }
@@ -1022,12 +1054,10 @@ async function sendMessage() {
   const useSearch = document.getElementById('useSearch').checked;
   const wfSel = document.getElementById('chat_workflow');
   const wfPath = wfSel.value || '';
-  const historyRounds = parseInt(document.getElementById('s_history_rounds').value) || 0;
   let promptText = text;
-  if (historyRounds > 0 && chatHistory.length >= 2) {
-    const recent = chatHistory.slice(-(historyRounds*2));
-    const ctx = recent.map(m => (m.role==='user'?'用户: ':'助手: ')+m.content).join('\n');
-    promptText = '历史对话:\n'+ctx+'\n\n用户当前输入: '+text;
+  const histText = buildHistoryText(text);
+  if (histText) {
+    promptText = '历史对话:\n' + histText + '\n\n用户当前输入: ' + text;
   }
   let roleTag = document.getElementById('chat_role').value.trim();
   // 发送前角色预检：始终先预检（手填角色也可能解析出多候选须让用户确认），
