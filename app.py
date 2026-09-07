@@ -140,9 +140,29 @@ def make_llm() -> LLMClient:
     )
 
 
-def make_comfy() -> ComfyUIClient:
-    return ComfyUIClient(server_url=settings.comfyui_url,
-                         output_dir=OUTPUTS_DIR)
+_COMFY_CLIENTS: dict = {}
+_COMFY_LOCK = threading.Lock()
+
+
+def make_comfy(shared: bool = True) -> ComfyUIClient:
+    """获取 ComfyUIClient。
+
+    shared=True: 复用常驻实例（主生成流程用——主流程本就 _gen_lock 串行）。
+    shared=False: 每次新建独立实例（图库二采用——避免与生成任务抢
+    session/client_id，即使生成中二采也能提交）。
+
+    模型驻留在 ComfyUI 服务端，与客户端实例无关；是否共享只影响
+    本地 HTTP 连接与提交通道。
+    """
+    url = settings.comfyui_url or ""
+    if not shared:
+        return ComfyUIClient(server_url=url, output_dir=OUTPUTS_DIR)
+    with _COMFY_LOCK:
+        c = _COMFY_CLIENTS.get(url)
+        if c is None or c.server_url != url.rstrip("/"):
+            c = ComfyUIClient(server_url=url, output_dir=OUTPUTS_DIR)
+            _COMFY_CLIENTS[url] = c
+        return c
 
 
 # ====================================================================== #
@@ -1622,7 +1642,7 @@ def api_upscale():
     # 上传到 ComfyUI input（安全文件名）
     import time as _t
     safe = f"up_{int(_t.time()*1000)}_{src.name}"
-    cli = make_comfy()   # 独立实例，避免与生成任务抢会话
+    cli = make_comfy(shared=False)   # 独立实例，避免与生成任务抢会话
     try:
         ok = cli.upload_image(src.read_bytes(), safe)
     except Exception as e:
