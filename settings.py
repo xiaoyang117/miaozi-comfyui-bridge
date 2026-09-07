@@ -54,11 +54,6 @@ DEFAULT_SETTINGS = {
     # ---- 提示词生成附加指令 ----
     "prompt_instructions": "",
 
-    # ---- 图库/二采 ----
-    # ComfyUI output 目录（图库历史图来源）；空=尝试从 comfyui_url 无法推断，
-    # 需在配置页手动填（如 H:/ComfyUI.../ComfyUI/output）
-    "comfyui_output_dir": "",
-
     # ---- 搜索（legacy，主流程已本地化，保留键位兼容旧 settings.json）----
     "search_sources": [
         {"name": "Bing", "url": "https://www.bing.com/search?q={query}&count={count}"}
@@ -159,11 +154,6 @@ class Settings:
     @property
     def comfyui_url(self) -> str:
         return str(self._data.get("comfyui_url", ""))
-
-    @property
-    def comfyui_output_dir(self) -> str:
-        """ComfyUI output 目录（图库历史图）；空表示未配置。"""
-        return str(self._data.get("comfyui_output_dir", "") or "").strip()
 
     @property
     def workflow_path(self) -> str:

@@ -1555,15 +1555,15 @@ _GALLERY_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 @app.route("/api/gallery", methods=["GET"])
 def api_gallery():
-    """列出 ComfyUI output 目录的历史图片（全历史图库）。
+    """列出工具本地 outputs 目录的历史图片（全历史图库）。
 
-    query: ?offset=&limit=&sub=&q=   sub=搜索子目录(如 anima base/);
+    query: ?offset=&limit=&sub=&q=   sub=搜索子目录;
     返回 {files: [{name, url, mtime}], total, offset, limit, root}
     """
-    root = Path(settings.comfyui_output_dir or "")
+    root = OUTPUTS_DIR
     if not root.is_dir():
         return jsonify({"success": False,
-                        "error": "未配置 ComfyUI output 目录",
+                        "error": "输出目录不存在",
                         "files": [], "total": 0}), 200
     offset = max(0, int(request.args.get("offset", 0) or 0))
     limit = min(200, max(1, int(request.args.get("limit", 60) or 60)))
@@ -1596,9 +1596,9 @@ def api_gallery():
 
 @app.route("/api/gallery/img")
 def api_gallery_img():
-    """从 ComfyUI output 目录读图（按相对路径，防目录穿越）。"""
+    """从工具本地 outputs 目录读图（按相对路径，防目录穿越）。"""
     f = (request.args.get("f") or "").strip()
-    root = Path(settings.comfyui_output_dir or "")
+    root = OUTPUTS_DIR
     if not root.is_dir() or not f:
         return "not found", 404
     try:
@@ -1612,22 +1612,22 @@ def api_gallery_img():
 
 @app.route("/api/upscale", methods=["POST"])
 def api_upscale():
-    """对 ComfyUI output 目录的一张历史图做二采（img2img 放大重采样）。
+    """对工具 outputs 目录的一张已生成图做二采（img2img 放大重采样）。
 
     body: {file: "相对路径/xxx.png", prompt?: "额外提示",
-           scale?: float(默认2), denoise?: float(默认0.5), seed?: int}
+           scale?: float, denoise?: float, seed?: int}
     返回 {success, image: 本地 outputs 下新图 URL}
     """
     data = request.get_json(force=True, silent=True) or {}
     rel = (data.get("file") or "").strip()
     if not rel:
         return jsonify({"success": False, "error": "缺少图片路径"}), 400
-    root = Path(settings.comfyui_output_dir or "")
+    root = OUTPUTS_DIR
     try:
         src = (root / rel).resolve()
         if not str(src).startswith(str(root.resolve())) or not src.is_file():
             return jsonify({"success": False,
-                            "error": "图片不在 ComfyUI output 目录"}), 400
+                            "error": "图片不在输出目录"}), 400
     except Exception:
         return jsonify({"success": False,
                         "error": "图片路径无效"}), 400

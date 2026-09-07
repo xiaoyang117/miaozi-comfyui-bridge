@@ -127,9 +127,6 @@
       <h3>ComfyUI 服务</h3>
       <label>ComfyUI 地址</label>
       <input id="s_comfyui_url" placeholder="http://127.0.0.1:8188">
-      <label>ComfyUI output 目录（图库来源，二采需配置）
-        <input id="s_comfyui_output_dir" placeholder="如 H:/ComfyUI.../ComfyUI/output" style="width:100%;margin-top:2px">
-      </label>
       <div class="btn-inline-row">
         <button class="btn-secondary" onclick="testComfyUI()">测试连接</button>
       </div>
@@ -385,54 +382,104 @@ function switchTab(name) {
 }
 
 // ================= 图库 / 二采 =================
-let _galleryLoaded = false, _gallerySel = null, _galleryTimer = null;
-function galleryInit() { if (!_galleryLoaded) { galleryLoad(); _galleryLoaded = true; } }
-function galleryDebounceSearch() {
-  clearTimeout(_galleryTimer);
-  _galleryTimer = setTimeout(galleryLoad, 300);
+let _galleryInit = false, _gallerySel = null, _galSelItem = null;
+let _galOffset = 0, _galTotal = 0, _galLoading = false, _galDone = false, _galTimer = null;
+const _GAL_PAGE = 60;
+function galleryInit() {
+  if (!_galleryInit) {
+    _galleryInit = true;
+    galleryLoad(true);   // 首屏
+    // 滚动到底自动加载更多
+    const grid = document.getElementById('galleryGrid');
+    if (grid && !grid._galScrollBound) {
+      grid._galScrollBound = true;
+      grid.addEventListener('scroll', () => {
+        if (grid.scrollTop + grid.clientHeight >= grid.scrollHeight - 120) galleryLoad(false);
+      });
+    }
+  }
 }
-async function galleryLoad() {
+function galleryDebounceSearch() {
+  clearTimeout(_galTimer);
+  _galTimer = setTimeout(() => galleryLoad(true), 300);
+}
+function _galleryItem(f) {
+  const it = document.createElement('div');
+  it.className = 'gallery-item';
+  const img = document.createElement('img');
+  img.src = f.url;
+  img.loading = 'lazy';
+  img.alt = f.name;
+  img.title = f.name;
+  const nm = document.createElement('div');
+  nm.className = 'gallery-name'; nm.textContent = f.name;
+  it.appendChild(img); it.appendChild(nm);
+  it.onclick = () => {
+    _gallerySel = f;
+    if (_galSelItem) _galSelItem.classList.remove('sel');
+    _galSelItem = it; it.classList.add('sel');
+    gallerySelect(f);
+  };
+  return it;
+}
+async function galleryLoad(reset) {
+  if (_galLoading) return;
+  if (reset) { _galOffset = 0; _galDone = false; _galSelItem = null; _gallerySel = null; }
+  if (_galDone) return;
   const grid = document.getElementById('galleryGrid');
   const empty = document.getElementById('galleryEmpty');
   const meta = document.getElementById('galleryMeta');
-  grid.innerHTML = '<p style="padding:12px;color:var(--text-faint)">加载中…</p>';
   const q = (document.getElementById('gallerySearch').value || '').trim();
+  if (reset) {
+    grid.innerHTML = '<p style="padding:12px;color:var(--text-faint)">加载中…</p>';
+    empty.style.display = 'none';
+  }
+  _galLoading = true;
   try {
-    const r = await fetch('/api/gallery?limit=120&q=' + encodeURIComponent(q));
+    const r = await fetch(`/api/gallery?limit=${_GAL_PAGE}&offset=${_galOffset}&q=${encodeURIComponent(q)}`);
     const d = await r.json();
     if (!d.success) {
       empty.style.display = ''; empty.textContent = d.error || '加载失败';
       grid.innerHTML = ''; meta.textContent = ''; return;
     }
-    meta.textContent = `共 ${d.total} 张`;
-    if (!d.files.length) { empty.style.display = ''; grid.innerHTML = ''; return; }
+    _galTotal = d.total;
+    meta.textContent = `共 ${_galTotal} 张 · 已显示 ${grid.querySelectorAll('.gallery-item').length + d.files.length}`;
+    if (reset) grid.innerHTML = '';
+    if (d.files.length === 0) {
+      if (_galOffset === 0) { empty.style.display = ''; empty.textContent = '没有匹配的图片'; }
+      _galDone = true;
+      return;
+    }
     empty.style.display = 'none';
-    grid.innerHTML = '';
-    for (const f of d.files.slice(0, 120)) {
-      const it = document.createElement('div');
-      it.className = 'gallery-item';
-      const img = document.createElement('img');
-      img.src = f.url;
-      img.loading = 'lazy';
-      img.alt = f.name;
-      img.title = f.name;
-      const nm = document.createElement('div');
-      nm.className = 'gallery-name'; nm.textContent = f.name;
-      it.appendChild(img); it.appendChild(nm);
-      it.onclick = () => { gallerySelect(f); it.classList.add('sel');
-        document.querySelectorAll('.gallery-item.sel').forEach(e => { if (e !== it) e.classList.remove('sel'); }); };
-      grid.appendChild(it);
+    const frag = document.createDocumentFragment();
+    for (const f of d.files) frag.appendChild(_galleryItem(f));
+    grid.appendChild(frag);
+    _galOffset += d.files.length;
+    if (_galOffset >= _galTotal) _galDone = true;
+    if (!_galDone) {
+      // 尾部提示(加载更多占位)
+      const more = document.createElement('p');
+      more.className = 'gallery-more'; more.id = 'galMore';
+      more.textContent = '↓ 滚动加载更多';
+      grid.appendChild(more);
+    } else {
+      const m = document.getElementById('galMore'); if (m) m.remove();
     }
   } catch (e) {
     empty.style.display = ''; empty.textContent = '图库加载失败: ' + e.message;
-    grid.innerHTML = '';
+    if (reset) grid.innerHTML = '';
+  } finally {
+    _galLoading = false;
   }
 }
 function gallerySelect(f) {
   _gallerySel = f;
-  document.getElementById('upscalePreview').src = f.url;
-  document.getElementById('upscalePanel').style.display = 'flex';
-  document.getElementById('upscaleStatus').textContent = '已选择: ' + f.name;
+  const up = document.getElementById('upscalePanel');
+  if (up) up.style.display = 'flex';
+  const prev = document.getElementById('upscalePreview');
+  if (prev) prev.src = f.url;
+  const st = document.getElementById('upscaleStatus');
+  if (st) st.textContent = '已选择: ' + f.name;
 }
 function upscaleCancelSel() {
   _gallerySel = null;
@@ -1458,7 +1505,6 @@ async function loadSettings(silent) {
       $('s_vlm_model').value = s.vlm_model||'';
       $('s_custom_system_prompt').value = s.custom_system_prompt||'';
       $('s_comfyui_url').value = s.comfyui_url||'';
-      $('s_comfyui_output_dir').value = s.comfyui_output_dir||'';
       $('s_prompt_placeholder').value = s.prompt_placeholder||'114514.1919810';
       $('s_save_node_id').value = s.save_node_id||'';
       $('s_workflow_path').value = (s.workflow_path && s.workflow_path.includes('/')) ? (s.workflow_path.split('/').pop()) : (s.workflow_path||'MIAOMIAO 1.json');
@@ -1489,7 +1535,6 @@ async function saveSettings() {
     vlm_model: $('s_vlm_model').value.trim(),
     custom_system_prompt: $('s_custom_system_prompt').value,
     comfyui_url: $('s_comfyui_url').value.trim(),
-    comfyui_output_dir: $('s_comfyui_output_dir').value.trim(),
     prompt_placeholder: $('s_prompt_placeholder').value.trim(),
     save_node_id: $('s_save_node_id').value.trim(),
     workflow_path: wfName || 'MIAOMIAO 1.json',
