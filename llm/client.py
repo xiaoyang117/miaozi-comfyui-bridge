@@ -70,6 +70,22 @@ PROMPT_WITH_CONTEXT_SPECIFIC = (
     "Do NOT include phrases like 'Here is', 'I created', 'Prompt:', or any explanation."
 )
 
+# 多角色专用：要求按角色分块，每角色完整描述（外貌+服装+动作+位置），
+# 块间用空行/分号分隔。最后给出场景与互动。Qwen-Image 系更适合这种结构。
+PROMPT_MULTI_ROLE_SPECIFIC = (
+    "You are an expert prompt writer for a multi-character image model "
+    "(Qwen-Image based). The scene contains several DIFFERENT characters. "
+    "Describe each character in its own clearly separated block. "
+    "For every character block include: character full danbooru name, "
+    "work name, appearance (hair/eyes/build), outfit/clothing, pose/action "
+    "and position in frame. Never mix one character's traits/outfit/action "
+    "into another character's block. "
+    "Between blocks use '; '. After all character blocks, add a short scene "
+    "sentence (background, lighting, mood) and their interaction. "
+    "Use natural English sentences and danbooru tags. No greetings, no "
+    "notes, no JSON, no code fences, no labels like 'Block:'."
+)
+
 
 class LLMClient:
     def __init__(self, base_url: str = "", api_key: str = "", model: str = "",

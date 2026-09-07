@@ -26,6 +26,7 @@ from character_lookup import tag_vocab as char_tags
 from comfyui.client import ComfyUIClient
 from llm.client import (LLMClient, PROMPT_SYSTEM_SPECIFIC,
                         PROMPT_WITH_CONTEXT_SPECIFIC,
+                        PROMPT_MULTI_ROLE_SPECIFIC,
                         SEARCH_SYSTEM_TINY, EXTRACT_CN_SYSTEM,
                         SIZE_DECIDE_SYSTEM)
 from settings import Settings
@@ -996,35 +997,43 @@ def _run_generation(data: dict):
             try:
                 # 第一步：先自由生成"草稿"（带标签风格引导）
                 draft = None
-                draft_pos_hint = ""   # 草稿中的角色位置/互动描述（多角色用）
+                draft_pos_hint = ""   # 草稿中的角色位置/互动描述（单角色多候选用）
+                multi_role_direct = False  # 多角色结构化块直通(不走词库过滤)
                 if search_info and best_ref:
-                    # 只给最匹配的那个角色参考，避免多候选特征互相干扰
                     ctx = f"角色参考资料:\n{best_ref}\n\n用户需求: {user_input}"
                     if len(roles_meta) >= 2:
-                        ctx += (
-                            "\n\n画面有多个角色。请按用户需求安排角色位置/互动"
-                            "（谁在左、谁在右、谁看谁等；用户没说就按出现顺序"
-                            "先左后右）。在草稿【最末尾】单独加一行构图说明，"
-                            "格式：\n[composition] 角色英文主名 in/on the left, "
-                            "角色英文主名 on the right, ... [/composition]\n"
-                            "只写这一行，不要混入标签列表。")
-                    draft = llm._call(PROMPT_WITH_CONTEXT_SPECIFIC,
-                                      ctx, history)
-                    draft_pos_hint = _extract_position_hint(
-                        draft, roles_meta)
+                        # 方案A：多角色结构化块。每个角色资料已含在 best_ref，
+                        # 要求 LLM 按角色独立分块(外貌+服装+动作+位置)。
+                        ctx = (f"角色资料(每个角色一段, 必须全部保留并展开成独立块):\n"
+                               f"{best_ref}\n\n"
+                               f"用户需求: {user_input}\n\n"
+                               f"把上面的每个角色分别写成完整独立的角色块——"
+                               f"含该角色的外貌/服装/动作/位置。"
+                               f"同一画面内每个角色出现一次, 绝不互相串特征。")
+                        draft = llm._call(PROMPT_MULTI_ROLE_SPECIFIC,
+                                          ctx, history)
+                        multi_role_direct = bool(draft)
+                    else:
+                        # 单角色：自由草稿
+                        draft = llm._call(PROMPT_WITH_CONTEXT_SPECIFIC,
+                                          ctx, history)
+                        draft_pos_hint = _extract_position_hint(
+                            draft, roles_meta)
                 else:
                     sp = PROMPT_SYSTEM_SPECIFIC if use_search \
                         else llm._prompt_system
                     draft = llm._call(sp, user_input, history)
                 # 剥掉草稿里的 [composition] 块（位置句已单独提取，
                 # 避免它污染词库校验/复选/直通 prompt）
-                if draft:
+                if draft and not multi_role_direct:
                     draft = _COMP_BLOCK.sub("", draft or "").strip(
                         " ,，、\n")
 
                 # 标签化处理：词库可用 + 总开关开启
+                # 多角色结构化块直通时不进词库(草稿即最终 prompt)
                 tag_prompt = None
-                if settings.tag_selection and char_tags.is_available():
+                if not multi_role_direct and \
+                        settings.tag_selection and char_tags.is_available():
                     if settings.tag_reselect:
                         # 复选开：每个角色的特征单独成组(尽量多选保本体)，
                         # 画面标签一个池（数量随草稿长度），一次调用挑完。
