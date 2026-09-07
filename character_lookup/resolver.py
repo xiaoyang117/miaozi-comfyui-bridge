@@ -243,6 +243,38 @@ def load_zh_works() -> dict:
         return data
 
 
+# 作品英文版权 -> 中文名 的倒排缓存（供界面展示中文作品名）
+_cn_rev_cache: dict = {"data": None, "mtime": 0.0}
+
+
+def copyright_cn_map() -> dict:
+    """返回 {copyright(小写): [中文名...]} 倒排索引（按 zh_works mtime 缓存）。"""
+    global _cn_rev_cache
+    try:
+        mtime = os.path.getmtime(ZH_WORK_FILE)
+    except OSError:
+        return {}
+    with _zh_lock:
+        if (_cn_rev_cache["data"] is not None
+                and _cn_rev_cache["mtime"] == mtime):
+            return _cn_rev_cache["data"]
+        rev: dict = {}
+        for cn, cps in load_zh_works().items():
+            for cp in cps:
+                if cp:
+                    rev.setdefault(cp.lower(), []).append(cn)
+        _cn_rev_cache = {"data": rev, "mtime": mtime}
+        return rev
+
+
+def copyright_to_cn(cp: str) -> str:
+    """copyright 标签 -> 中文作品名；无则返回空串。"""
+    if not cp:
+        return ""
+    names = copyright_cn_map().get(cp.lower())
+    return names[0] if names else ""
+
+
 def _prefer_copyrights(text: str) -> set[str]:
     """从输入文本里找出『作品线索』对应的 copyright 标签集合。
 

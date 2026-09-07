@@ -1420,6 +1420,8 @@ def api_resolve_role():
             "copyright": d.get("copyright", ""),
             "name": d.get("name", ""),
             "copyright_name": d.get("copyright_name", ""),
+            "copyright_cn": char_resolver.copyright_to_cn(
+                d.get("copyright", "")),   # 中文作品名(弹卡展示)
             "trigger": (d.get("trigger") or "")[:120],
             "core_head": ", ".join(
                 [t.strip() for t in core.split(",") if t.strip()][:12]),

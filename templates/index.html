@@ -511,7 +511,7 @@ function askRoleChoice(candidates, hintText) {
     const row = document.createElement('button');
     row.type = 'button';
     row.className = 'role-choice-card';
-    const cn = (c.copyright_name || c.copyright || '').replace(/_/g, ' ');
+    const cn = (c.copyright_cn || c.copyright_name || c.copyright || '').replace(/_/g, ' ');
     row.innerHTML =
       '<div class="role-choice-main">' +
         '<span class="role-choice-name">' + esc(c.character) + '</span>' +
