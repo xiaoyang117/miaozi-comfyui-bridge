@@ -269,7 +269,8 @@ def _slugify_tag(t: str) -> str:
 
 
 def _arrange_multirole(tag_list: list[str],
-                       roles_meta: list[dict]) -> str:
+                       roles_meta: list[dict],
+                       pos_hint: str = "") -> str:
     """多角色时按角色分块重排提示词，让特征贴着自己的角色名，
     减少 SD/Qwen 系模型跨角色串特征。
 
@@ -327,13 +328,47 @@ def _arrange_multirole(tag_list: list[str],
         blocks.append(", ".join(tail))
     text = ", ".join(blocks)
 
-    # 位置锚定：仅两角色，按出现顺序左/右描述（引导不串位）
+    # 位置/互动描述：优先 LLM 在草稿写的构图说明；没有再程序兜底左右
     if len(roles_meta) == 2:
-        r1 = roles_meta[0].get("query", "").split("(")[0].strip("_")
-        r2 = roles_meta[1].get("query", "").split("(")[0].strip("_")
-        if r1 and r2 and r1 != r2:
-            text = f"{text}, {r1} on the left, {r2} on the right"
+        if pos_hint:
+            text = f"{text}, {pos_hint}"
+        else:
+            r1 = roles_meta[0].get("query", "").split("(")[0].strip("_")
+            r2 = roles_meta[1].get("query", "").split("(")[0].strip("_")
+            if r1 and r2 and r1 != r2:
+                text = f"{text}, {r1} on the left, {r2} on the right"
+    elif pos_hint:
+        text = f"{text}, {pos_hint}"
     return text
+
+
+_COMP_BLOCK = re.compile(
+    r"\[composition\](.*?)\[/composition\]", re.IGNORECASE | re.S)
+
+
+def _extract_position_hint(draft: str,
+                           roles_meta: list[dict]) -> str:
+    """从草稿提取 LLM 写的 [composition] 构图说明（自然语言，不校验）。
+
+    返回规范化的位置/互动短句（如 "nagato on the left, akagi on the right"），
+    空串表示 LLM 没写（调用方决定兜底）。
+    """
+    if not draft:
+        return ""
+    m = _COMP_BLOCK.search(draft)
+    if not m:
+        return ""
+    body = m.group(1).strip().strip(",。 ")
+    if not body:
+        return ""
+    # 去掉可能混入的其它标签性杂质：只要含位置/互动词才保留
+    low = body.lower()
+    pos_words = ("left", "right", "behind", "front", "next to", "beside",
+                 "holding", "looking at", "embracing", "leaning",
+                 "standing", "sitting", "behind")
+    if any(w in low for w in pos_words):
+        return body[:160]
+    return ""
 
 
 # 画面标签选取数量随草稿丰富度变化：草稿越长（需求越复杂），画面区需补的越多。
@@ -961,15 +996,31 @@ def _run_generation(data: dict):
             try:
                 # 第一步：先自由生成"草稿"（带标签风格引导）
                 draft = None
+                draft_pos_hint = ""   # 草稿中的角色位置/互动描述（多角色用）
                 if search_info and best_ref:
                     # 只给最匹配的那个角色参考，避免多候选特征互相干扰
                     ctx = f"角色参考资料:\n{best_ref}\n\n用户需求: {user_input}"
+                    if len(roles_meta) >= 2:
+                        ctx += (
+                            "\n\n画面有多个角色。请按用户需求安排角色位置/互动"
+                            "（谁在左、谁在右、谁看谁等；用户没说就按出现顺序"
+                            "先左后右）。在草稿【最末尾】单独加一行构图说明，"
+                            "格式：\n[composition] 角色英文主名 in/on the left, "
+                            "角色英文主名 on the right, ... [/composition]\n"
+                            "只写这一行，不要混入标签列表。")
                     draft = llm._call(PROMPT_WITH_CONTEXT_SPECIFIC,
                                       ctx, history)
+                    draft_pos_hint = _extract_position_hint(
+                        draft, roles_meta)
                 else:
                     sp = PROMPT_SYSTEM_SPECIFIC if use_search \
                         else llm._prompt_system
                     draft = llm._call(sp, user_input, history)
+                # 剥掉草稿里的 [composition] 块（位置句已单独提取，
+                # 避免它污染词库校验/复选/直通 prompt）
+                if draft:
+                    draft = _COMP_BLOCK.sub("", draft or "").strip(
+                        " ,，、\n")
 
                 # 标签化处理：词库可用 + 总开关开启
                 tag_prompt = None
@@ -1063,12 +1114,16 @@ def _run_generation(data: dict):
                     # 校验/复选出的真实标签作为提示词主体
                     # 多角色时按角色分块（特征贴角色名）防串
                     if len(roles_meta) >= 2:
-                        prompt = _arrange_multirole(tag_prompt, roles_meta)
+                        prompt = _arrange_multirole(
+                            tag_prompt, roles_meta, draft_pos_hint)
                     else:
                         prompt = ", ".join(tag_prompt)
                 else:
                     # 回退：草稿原样使用（词库不可用/总开关关/校验全被剔）
                     prompt = draft or ""
+                    if prompt and len(roles_meta) >= 2:
+                        if draft_pos_hint:
+                            prompt = f"{prompt}, {draft_pos_hint}"
                 if not prompt:
                     raise RuntimeError("LLM 返回了空提示词")
                 # 角色已命中但 LLM 漏输出角色标签时，前置注入（确定性兜底，
