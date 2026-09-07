@@ -34,6 +34,13 @@
         </label>
       </div>
       <div class="toolbar-sep"></div>
+      <div class="toolbar-group tb-upscale">
+        <label class="toggle-label" title="对图库中的已有图片做二采（放大 + 重绘精修），结果作为一条新消息出现">
+          <input type="checkbox" id="useUpscale" onchange="toggleUpscaleBar()">
+          <span class="toggle-slider"></span>二采
+        </label>
+      </div>
+      <div class="toolbar-sep"></div>
       <div class="toolbar-group tb-workflow">
         <select id="chat_workflow" title="选择工作流"></select>
       </div>
@@ -63,6 +70,38 @@
         <span class="step-chip" data-step="4"><i></i>出图</span>
       </div>
       <div class="step-msg"><span id="stepDot" class="step-dot"></span><span id="stepText">📤 等待服务器响应…</span></div>
+    </div>
+
+    <!-- 二采操作条（开关开启后显示）：下拉选图 + 参数 + 执行 -->
+    <div id="upscaleBar" class="upscale-bar hidden">
+      <div class="upscale-bar-head">
+        <span class="upscale-title">🖼 二采超分（对图库已有图 放大 + 重绘精修）</span>
+      </div>
+      <div class="upscale-bar-row">
+        <select id="upImgSelect" onchange="upSelChanged()" style="flex:1;min-width:140px">
+          <option value="">— 加载图库… —</option>
+        </select>
+        <img id="upSelThumb" class="up-sel-thumb hidden" alt="预览">
+        <label>放大
+          <select id="upScale2">
+            <option value="1">1x（仅精修）</option>
+            <option value="1.5" selected>1.5x</option>
+            <option value="2">2x</option>
+            <option value="2.5">2.5x</option>
+            <option value="3">3x</option>
+          </select>
+        </label>
+        <label>幅度
+          <select id="upDenoise2">
+            <option value="0.2">0.2 轻</option>
+            <option value="0.3" selected>0.3 标准</option>
+            <option value="0.45">0.45 中</option>
+            <option value="0.6">0.6 强</option>
+          </select>
+        </label>
+        <button id="upRunBtn2" onclick="upscaleFromChat()">✨ 二采</button>
+      </div>
+      <div id="upscaleChatStatus" class="upscale-chat-status"></div>
     </div>
 
     <div class="chat-input-bar">
@@ -295,28 +334,7 @@
     </div>
     <div class="gallery-wrap">
       <div id="galleryGrid" class="gallery-grid"></div>
-      <div id="galleryEmpty" class="gallery-empty" style="display:none">图库为空，请先在 ComfyUI 配置 output 目录（配置页）。</div>
-    </div>
-    <!-- 二采操作条 -->
-    <div id="upscalePanel" class="upscale-panel" style="display:none">
-      <div class="upscale-source">
-        <img id="upscalePreview" src="" alt="选中的图">
-      </div>
-      <div class="upscale-controls">
-        <div class="field-hint">对选中图片做二采（单二采工作流：latent 放大 + 低幅度重绘精修，自动用 anima base + Harem 模型）。</div>
-        <label>放大倍数 <input id="upScale" type="range" min="1" max="3" step="0.5" value="1.5">
-          <span id="upScaleVal">1.5x</span></label>
-        <label>重绘幅度 (denoise)
-          <input id="upDenoise" type="range" min="0.15" max="0.8" step="0.05" value="0.3">
-          <span id="upDenoiseVal">0.30</span></label>
-        <label>附加提示词（可选，可留空）<input id="upPrompt" type="text"
-          placeholder="如：more detail, clean lineart" style="width:100%"></label>
-        <div class="btn-inline-row">
-          <button id="upBtn" onclick="upscaleRun()">✨ 二采超分</button>
-          <button class="btn-secondary" onclick="upscaleCancelSel()">取消选择</button>
-        </div>
-        <div id="upscaleStatus" style="font-size:.8rem;color:var(--text-faint)"></div>
-      </div>
+      <div id="galleryEmpty" class="gallery-empty" style="display:none">图库为空，先在对话页生成图片即可在此看到。</div>
     </div>
   </div>
 </div>
@@ -490,60 +508,90 @@ async function galleryLoad(reset) {
   }
 }
 function gallerySelect(f) {
+  // 图库页点击：直接弹大图预览（原二采面板已移到对话页开关里）
   _gallerySel = f;
-  const up = document.getElementById('upscalePanel');
-  if (up) up.style.display = 'flex';
-  const prev = document.getElementById('upscalePreview');
-  if (prev) prev.src = f.url;
-  const st = document.getElementById('upscaleStatus');
-  if (st) st.textContent = '已选择: ' + f.name;
+  showImageModal(f.url);
 }
-function upscaleCancelSel() {
-  _gallerySel = null;
-  document.getElementById('upscalePanel').style.display = 'none';
-  document.getElementById('upscaleStatus').textContent = '';
+
+// ================= 对话页二采（开关 + 下拉选图） =================
+let _upList = null;   // 图库文件缓存 {name: f}
+async function toggleUpscaleBar() {
+  const on = document.getElementById('useUpscale').checked;
+  const bar = document.getElementById('upscaleBar');
+  if (on) {
+    bar.classList.remove('hidden');
+    await loadUpscaleSelect(true);
+  } else {
+    bar.classList.add('hidden');
+    document.getElementById('upscaleChatStatus').textContent = '';
+  }
 }
-function _syncRange(id, suffix) {
-  const v = document.getElementById(id).value;
-  document.getElementById(id + 'Val').textContent =
-    id === 'upScale' ? (parseFloat(v).toFixed(1) + 'x') : v;
+async function loadUpscaleSelect(force) {
+  const sel = document.getElementById('upImgSelect');
+  try {
+    const r = await fetch('/api/gallery?limit=100');
+    const d = await r.json();
+    if (!d.success || !d.files) throw new Error(d.error || '图库加载失败');
+    _upList = {};
+    sel.innerHTML = '';
+    for (const f of d.files) {
+      _upList[f.name] = f;
+      const o = document.createElement('option');
+      o.value = f.name; o.textContent = f.name;
+      sel.appendChild(o);
+    }
+    if (d.files.length === 0) {
+      sel.innerHTML = '<option value="">图库暂无图片</option>';
+    }
+    upSelChanged();
+  } catch (e) {
+    sel.innerHTML = '<option value="">加载失败: ' + e.message + '</option>';
+  }
 }
-(function bindRanges() {
-  const s = document.getElementById('upScale');
-  const dn = document.getElementById('upDenoise');
-  if (s) s.oninput = () => _syncRange('upScale');
-  if (dn) dn.oninput = () => _syncRange('upDenoise');
-})();
-async function upscaleRun() {
-  if (!_gallerySel) return;
-  const btn = document.getElementById('upBtn');
-  const status = document.getElementById('upscaleStatus');
-  const scale = parseFloat(document.getElementById('upScale').value);
-  const denoise = parseFloat(document.getElementById('upDenoise').value);
-  const prompt = (document.getElementById('upPrompt').value || '').trim();
+function upSelChanged() {
+  const sel = document.getElementById('upImgSelect');
+  const th = document.getElementById('upSelThumb');
+  const f = sel.value && _upList ? _upList[sel.value] : null;
+  if (f) { th.classList.remove('hidden'); th.src = f.url; }
+  else { th.classList.add('hidden'); th.src = ''; }
+}
+async function upscaleFromChat() {
+  const sel = document.getElementById('upImgSelect');
+  const status = document.getElementById('upscaleChatStatus');
+  const btn = document.getElementById('upRunBtn2');
+  const f = sel.value && _upList ? _upList[sel.value] : null;
+  if (!f) { status.textContent = '请先从下拉框选择一张图'; return; }
+  const scale = parseFloat(document.getElementById('upScale2').value);
+  const denoise = parseFloat(document.getElementById('upDenoise2').value);
   btn.disabled = true; btn.textContent = '⏳ 二采中…';
-  status.textContent = '提交二采（约 30~90 秒，请勿关闭页面）…';
+  status.textContent = `二采中：${f.name} → ${scale}x / 幅度 ${denoise}（30~120 秒）…`;
   try {
     const r = await fetch('/api/upscale', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ file: _gallerySel.path, scale, denoise,
-                             prompt: prompt || undefined }),
+      body: JSON.stringify({ file: f.path, scale, denoise }),
     });
     const d = await r.json();
     if (!d.success) throw new Error(d.error || '二采失败');
-    status.textContent = '✅ 完成：' + d.image + ` (${scale}x, denoise ${denoise})`;
-    // 追加到图库顶部并展示新图
-    const img = document.createElement('div');
-    img.className = 'gallery-item new';
-    const i2 = document.createElement('img');
-    i2.src = d.image + '?cb=' + Date.now(); i2.alt = '二采结果';
-    img.appendChild(i2);
-    document.getElementById('galleryGrid').prepend(img);
-    showImageModal(d.image + '?cb=' + Date.now());
+    status.textContent = `✅ 完成（${scale}x, denoise ${denoise}）`;
+    // 作为助手气泡插入对话
+    const cacheBust = d.image + '?cb=' + Date.now();
+    chatHistory.push({ role: 'assistant', content: `二采超分: ${f.name} (${scale}x)` });
+    chatLog.push({ role: 'assistant', text: `二采超分: ${f.name} (${scale}x)`, imageUrl: d.image, search: null, vlm: null, size: null });
+    saveChatLog();
+    addChatBubble('assistant', `二采超分: ${f.name} (${scale}x)`, cacheBust, null, chatLog.length - 1);
+    // 刷新图库下拉（新图加入）+ 自动切到最新
+    await loadUpscaleSelect(false);
+    const nsel = document.getElementById('upImgSelect');
+    if (_upList && _upList[d.image.split('/').pop()]) {
+      nsel.value = d.image.split('/').pop();
+    }
+    upSelChanged();
+    showImageModal(cacheBust);
+    switchTab('chat');
   } catch (e) {
     status.textContent = '❌ ' + e.message;
   } finally {
-    btn.disabled = false; btn.textContent = '✨ 二采超分';
+    btn.disabled = false; btn.textContent = '✨ 二采';
   }
 }
 

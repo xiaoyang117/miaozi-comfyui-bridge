@@ -671,3 +671,12 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   cursor: pointer; flex-shrink: 0; align-self: center; }
 .btn-shutdown:hover { border-color: var(--red); }
 .btn-shutdown:disabled { opacity: .5; cursor: default; }
+
+/* ================= 对话页二采条 ================= */
+.upscale-bar { border-top: 1px dashed var(--border); padding: 6px 8px; display: flex; flex-direction: column; gap: 6px; background: var(--bg-elev); }
+.upscale-bar.hidden { display: none; }
+.upscale-bar-head { font-size: .76rem; font-weight: 600; color: var(--text); }
+.upscale-bar-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.upscale-bar-row select, .upscale-bar-row button { font-size: .78rem; padding: 3px 6px; }
+.up-sel-thumb { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-elev-2); }
+.upscale-chat-status { font-size: .74rem; color: var(--text-faint); min-height: 1em; }
