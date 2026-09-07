@@ -305,12 +305,12 @@
         <img id="upscalePreview" src="" alt="选中的图">
       </div>
       <div class="upscale-controls">
-        <div class="field-hint">对选中图片做二采（img2img 放大重采样，自动用 anima base + Harem 模型精修）。</div>
-        <label>放大倍数 <input id="upScale" type="range" min="1.5" max="3" step="0.5" value="2">
-          <span id="upScaleVal">2.0x</span></label>
+        <div class="field-hint">对选中图片做二采（单二采工作流：latent 放大 + 低幅度重绘精修，自动用 anima base + Harem 模型）。</div>
+        <label>放大倍数 <input id="upScale" type="range" min="1" max="3" step="0.5" value="1.5">
+          <span id="upScaleVal">1.5x</span></label>
         <label>重绘幅度 (denoise)
-          <input id="upDenoise" type="range" min="0.15" max="0.8" step="0.05" value="0.45">
-          <span id="upDenoiseVal">0.45</span></label>
+          <input id="upDenoise" type="range" min="0.15" max="0.8" step="0.05" value="0.3">
+          <span id="upDenoiseVal">0.30</span></label>
         <label>附加提示词（可选，可留空）<input id="upPrompt" type="text"
           placeholder="如：more detail, clean lineart" style="width:100%"></label>
         <div class="btn-inline-row">

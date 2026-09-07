@@ -1633,7 +1633,7 @@ def api_upscale():
                         "error": "上传图片到 ComfyUI 失败（检查服务）"}), 500
 
     try:
-        wf = load_workflow("MIAOMIAO img2img.json")
+        wf = load_workflow("MIAOMIAO 单二采.json")
     except Exception as e:
         log.error("[upscale] 模板加载失败: %s", e)
         return jsonify({"success": False,

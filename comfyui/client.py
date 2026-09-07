@@ -171,6 +171,8 @@ class ComfyUIClient:
                     inputs[k] = input_filename
                 elif ct == "ImageScaleBy" and k == "scale_by":
                     inputs[k] = float(scale)
+                elif ct == "LatentUpscaleBy" and k == "scale_by":
+                    inputs[k] = float(scale)
                 elif ct == "KSampler" and k == "denoise":
                     inputs[k] = float(denoise)
                 elif ct == "KSampler" and k == "seed":
