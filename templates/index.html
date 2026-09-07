@@ -1042,23 +1042,39 @@ async function sendMessage() {
         body: JSON.stringify({ prompt: preQ }),
       });
       const pre = await preRes.json();
-      if (pre && pre.success && pre.need_choice && pre.candidates) {
-        const chosen = await askRoleChoice(
-          pre.candidates,
-          '检测到多个角色，选一个作为本次生成的角色参考：');
-        if (chosen === null) {           // ✕ = 取消整次发送
+      if (pre && pre.success && pre.roles && pre.roles.length) {
+        // 多角色：逐个处理。已确定的角色收集到 chosenRoles[]
+        let chosenRoles = [];
+        let cancelled = false;
+        const promptRoles = (roleTag && _looks_like_tag_value(roleTag))
+          ? roleTag.split(',').map(s=>s.trim()).filter(Boolean) : [];
+        for (const rg of pre.roles) {
+          const cands = rg.candidates || [];
+          if (!cands.length) continue;
+          if (rg.need_choice) {
+            // 该角色有跨作品歧义 -> 弹卡选
+            const chosen = await askRoleChoice(
+              cands,
+              `检测到多个角色，为「${rg.label}」选一个作为生成参考：`);
+            if (chosen === null) { cancelled = true; break; }   // ✕ 取消
+            if (chosen) { chosenRoles.push(chosen); }
+            // undefined = "不选该角色"，跳过
+          } else {
+            // 无歧义 -> 自动取第一个（除非用户已在角色框精确指定）
+            chosenRoles.push(cands[0].character);
+          }
+        }
+        if (cancelled) {
           isGenerating = false;
           sendBtn.disabled = false; sendBtn.textContent = '生成';
           input.focus();
           return;
         }
-        if (chosen) roleTag = chosen;   // 选定角色 slug 覆盖手填值
-        // chosen === undefined（"不选角色"）→ 不填 role
-      } else if (pre && pre.success && !pre.need_choice && pre.candidates
-                 && pre.candidates.length >= 1) {
-        // 单一候选：自动用它填充 roleTag（避免手填中文名解析错或后端歧义）
-        if (!roleTag || !_looks_like_tag_value(roleTag)) {
-          roleTag = pre.candidates[0].character;
+        // 用户手填的纯 slug 角色 + 预检确认的角色合并
+        const allRoles = promptRoles.concat(
+          chosenRoles.filter(r => !promptRoles.includes(r)));
+        if (allRoles.length) {
+          roleTag = allRoles.join(', ');   // 逗号分隔 -> 后端按多角色解析
         }
       }
     } catch(e) {

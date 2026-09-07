@@ -373,6 +373,104 @@ def resolve_from_text(text: str, n: int = 3, strict: bool = False) -> list[dict]
     return []
 
 
+def resolve_multi(text: str, max_roles: int = 3) -> list[list[dict]]:
+    """从一段文本里解析出【多个不同角色】（用于多角色同框）。
+
+    返回 list[list[dict]]：每个内层列表 = 该角色的一组候选（首项为最佳）。
+    例： resolve_multi("碧蓝航线的长门和赤城")
+      -> [ [nagato_(azur_lane)...], [akagi_(azur_lane)...] ]
+
+    策略（本地规则，无 LLM）：
+      1) 若文本本身是逗号分隔的英文标签/别名 → 逐段解析
+      2) 中文：match_zh_names 得全部命中，按【位置不重叠】贪心取
+         （避免"长门酱"和"长门"重叠双计；作品线索只服务其所在角色）
+      3) 每个选中词交给 _resolve_one 返回候选
+      4) 别名表(aliases.json)命中也能多角色
+    按文本出现顺序返回；同一 character 去重。
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    out: list[list[dict]] = []
+    seen_char: set[str] = set()
+
+    def _push(cands: list[dict]):
+        if not cands:
+            return
+        top = cands[0].get("character", "")
+        if top in seen_char:
+            return
+        seen_char.add(top)
+        out.append(cands)
+
+    def _resolve_one(seg: str) -> list[dict]:
+        """单段解析：整段作为一个角色（含消歧），不递归展开多角色。
+
+        用原始 text 做作品线索消歧（seg 可能是剥离上下文的孤立角色词，
+        而"碧蓝航线的长门"里的 azur_lane 线索在 text 中）。
+        """
+        seg = seg.strip().strip("，,、+和与跟及")
+        if not seg:
+            return []
+        cands = resolve_from_text(seg, strict=True)
+        return _disambiguate(cands, text) if cands else []
+
+    # 1) 英文逗号分隔段（如 "shiroko_(blue_archive), hoshino_(blue_archive)"，
+    #    或 "长门, 赤城" 混排）：按逗号拆段逐个解析
+    parts = [p for p in re.split(r"[，,、]+", text) if p.strip()]
+    if len(parts) > 1:
+        tag_like = re.compile(r"^[a-z0-9_\-() ]+$")
+        if all(tag_like.match(p.strip()) or re.search(r"[\u4e00-\u9fff]", p)
+               for p in parts):
+            for p in parts:
+                _push(_resolve_one(p))
+            return out[:max_roles]
+
+    # 2) 中文名映射（多命中，按位置不重叠贪心）
+    zh_hits = match_zh_names(text)   # [(中文名, [角色tag...])] 长->短
+    used_spans: list[tuple[int, int]] = []
+
+    def _overlaps(s0: int, e0: int) -> bool:
+        for s1, e1 in used_spans:
+            if s0 < e1 and s1 < e0:
+                return True
+        return False
+
+    zh_grouped: dict[str, list[tuple[int, int]]] = {}
+    for k, roles in zh_hits:
+        # 所有出现位置
+        pos = 0
+        while True:
+            i = text.find(k, pos)
+            if i < 0:
+                break
+            zh_grouped.setdefault(k, []).append((i, i + len(k)))
+            pos = i + 1
+    # 按【首次出现位置】升序（保持文本中角色顺序）；同位置按长度降序
+    zh_order = sorted(
+        zh_grouped.items(),
+        key=lambda kv: (min(s for s, _ in kv[1]), -len(kv[0])))
+    for k, positions in zh_order:
+        for (s, e) in positions:
+            if _overlaps(s, e):
+                continue
+            used_spans.append((s, e))
+            _push(_resolve_one(k))
+            if len(out) >= max_roles:
+                return out
+
+    # 3) 别名表命中（可能多条）
+    alias_hits = match_aliases(text)
+    if alias_hits and len(out) < max_roles:
+        for _alias, role in alias_hits:
+            if len(out) >= max_roles:
+                break
+            res = _lookup_role(role)
+            if res:
+                _push(_disambiguate(res, text))
+    return out[:max_roles]
+
+
 def _confidence_ok(input_text: str, best: dict) -> bool:
     """判断宽松命中的置信度：输入里的有效词须出现在角色字段中。"""
     words = [w for w in re.split(r"[^a-z0-9]+", input_text.lower()) if len(w) >= 3]

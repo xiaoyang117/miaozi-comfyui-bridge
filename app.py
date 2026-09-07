@@ -732,40 +732,66 @@ def _run_generation(data: dict):
                           f"{vlm_description}\n\n用户需求：{user_input}")
 
         # ---------- Step 1: 角色识别（规则优先，LLM 兜底） ----------
+        # roles_meta: 本次命中的角色（1~N 个），每个含 best 单角色信息
         search_info = None
         raw = None
         best_ref = None   # 最匹配角色的参考文本（喂模型用，避免多候选干扰）
-        char_core_tags = ""   # 命中角色的 core_tags（供标签选词召回）
+        roles_meta: list[dict] = []   # [{query, copyright, core_tags, ref}]
+        char_core_tags = ""   # 命中角色的 core_tags 汇总（逗号拼接，供标签选词）
         role_hint = (data.get("role") or "").strip()
         if use_search:
             yield {"step": "search", "msg": "🔎 正在识别角色…"}
             cands: list = []
+            multi_cands: list[list] = []   # 每个角色一组候选（多角色）
             via = ""
             role_missed = False
             try:
                 # (0) 手动指定角色（最高优先级，完全绕过识别）
                 if role_hint:
-                    cands = char_resolver.resolve_from_text(role_hint,
-                                                            strict=True)
-                    if cands:
-                        via = "手动指定"
-                        # 用户明确给的中文称呼 -> 记住别名
-                        char_resolver.learn(role_hint, cands[0], via)
+                    if "," in role_hint or "，" in role_hint:
+                        # 逗号分隔的多个角色 -> 各自解析
+                        for seg in re.split(r"[，,]+", role_hint):
+                            sub = char_resolver.resolve_from_text(
+                                seg.strip(), strict=True)
+                            if sub:
+                                multi_cands.append(sub)
+                                via = "手动指定(多角色)"
+                            else:
+                                role_missed = True
+                        cands = multi_cands[0] if multi_cands else []
                     else:
-                        role_missed = True
-                        # 若输入是自由文本（非纯标签样式），允许结合描述再查一次
-                        if not _looks_like_tag(role_hint):
-                            cands = char_resolver.resolve_from_text(
-                                f"{role_hint} {user_input}")
-                            via = "手动指定(结合描述)"
+                        cands = char_resolver.resolve_from_text(role_hint,
+                                                                strict=True)
+                        if cands:
+                            via = "手动指定"
+                            # 用户明确给的中文称呼 -> 记住别名
+                            char_resolver.learn(role_hint, cands[0], via)
+                        else:
+                            role_missed = True
+                            # 若输入是自由文本（非纯标签样式），允许结合描述再查一次
+                            if not _looks_like_tag(role_hint):
+                                cands = char_resolver.resolve_from_text(
+                                    f"{role_hint} {user_input}")
+                                via = "手动指定(结合描述)"
                 # (1) 规则层：英文直查 / 中文别名表 / 多候选 —— 无需 LLM
-                if not cands:
-                    cands = char_resolver.resolve_from_text(user_input)
-                    if cands:
-                        via = "本地库直查(无LLM)"
+                if not cands and not multi_cands:
+                    if role_hint and role_missed and not _looks_like_tag(
+                            role_hint):
+                        # 手动中文名 strict 未中：结合描述再查一次
+                        sub = char_resolver.resolve_from_text(
+                            f"{role_hint} {user_input}")
+                        if sub:
+                            multi_cands = [sub]
+                            cands = sub
+                            via = "手动指定(结合描述)"
+                    if not cands and not multi_cands:
+                        multi_cands = char_resolver.resolve_multi(user_input)
+                        if multi_cands:
+                            cands = multi_cands[0]
+                            via = "本地库直查(无LLM)"
 
                 # (2) LLM 兜底层：仅当规则层没命中时才调用
-                if not cands:
+                if not cands and not multi_cands:
                     # 先让 LLM 给英文标签（提示词已对小模型简化）
                     q = ""
                     try:
@@ -790,30 +816,54 @@ def _run_generation(data: dict):
                         if not cands and cn and cn != "未知":
                             cands = _translate_and_lookup(cn, llm, history)
                             via = "LLM翻译"
+                    if cands:
+                        multi_cands = [cands]
 
-                # (3) 组装结果
-                if cands:
-                    raw = _fmt_candidates(cands)      # 多候选：界面展示用
-                    best = cands[0]
-                    best_ref = _fmt_best_candidate(best)  # 单候选：模型参考用
-                    char_core_tags = best.get("core_tags", "") or ""
-                    search_info = {
-                        "query": best.get("character", ""),
-                        "copyright": best.get("copyright", ""),
-                        "via": via,
-                        "role_missed": role_missed,
-                        "candidates": [c.get("character", "")
-                                       for c in cands[:5]],
-                        "results": (raw or "")[:800],
-                    }
-                    log.info("[%s] search hit via=%s -> %s",
-                             gid, via, best.get("character"))
-                    yield {"step": "search",
-                           "msg": f"✓ 角色识别：{best.get('character')} ({via})"}
-                    # 仅当用户显式给出中文角色（role框/描述直名）时学习别名，
-                    # 避免把 LLM 猜错的结果或整句描述写进别名表。
-                    # 学习统一由 _translate_and_lookup 以精确中文名触发。
-                else:
+                # (3) 组装结果（多角色）
+                if multi_cands:
+                    roles_meta = []
+                    raw_parts = []
+                    ref_parts = []
+                    for grp in multi_cands:
+                        if not grp:
+                            continue
+                        best = grp[0]
+                        roles_meta.append({
+                            "query": best.get("character", ""),
+                            "copyright": best.get("copyright", ""),
+                            "core_tags": best.get("core_tags", "") or "",
+                            "ref": _fmt_best_candidate(best),
+                        })
+                        raw_parts.append(_fmt_candidates(grp))
+                        ref_parts.append(best.get("character", ""))
+                    if not roles_meta:
+                        multi_cands = []
+                        cands = []
+                    else:
+                        raw = "\n".join(raw_parts)
+                        best_ref = "\n\n".join(r["ref"] for r in roles_meta)
+                        char_core_tags = ",".join(
+                            r["core_tags"] for r in roles_meta)
+                        main_role = roles_meta[0]
+                        search_info = {
+                            "query": main_role["query"],
+                            "copyright": main_role["copyright"],
+                            "via": via,
+                            "role_missed": role_missed,
+                            "candidates": [g[0].get("character", "")
+                                           for g in multi_cands],
+                            "results": (raw or "")[:800],
+                            "role_count": len(roles_meta),
+                        }
+                        names = " + ".join(ref_parts)
+                        log.info("[%s] search hit via=%s -> %s (%d 角色)",
+                                 gid, via, names, len(roles_meta))
+                        yield {"step": "search",
+                               "msg": f"✓ 角色识别：{names} ({via})"}
+                        # 仅当用户显式给出中文角色（role框/描述直名）时学习别名，
+                        # 避免把 LLM 猜错的结果或整句描述写进别名表。
+                        # 学习统一由 _translate_and_lookup 以精确中文名触发。
+                if not multi_cands:
                     log.warning("[search] 未找到角色: %s", user_input[:60])
                     search_info = {"query": "", "via": via,
                                    "results": "",
@@ -852,25 +902,46 @@ def _run_generation(data: dict):
                 tag_prompt = None
                 if settings.tag_selection and char_tags.is_available():
                     if settings.tag_reselect:
-                        # 复选开：角色特征单独一个池（尽量多选保本体），
-                        # 画面标签另一个池（选 8~15 个），一次调用挑完两区
-                        role_tags = []
-                        if char_core_tags:
-                            for t in re.split(r"[,\n]", char_core_tags):
-                                t2 = t.strip().replace(" ", "_")
-                                if t2 and t2 not in role_tags:
-                                    role_tags.append(t2)
+                        # 复选开：每个角色的特征单独成组(尽量多选保本体)，
+                        # 画面标签一个池（数量随草稿长度），一次调用挑完。
+                        trait_groups: list[list[str]] = []
+                        if roles_meta:
+                            for rm in roles_meta:
+                                grp = []
+                                for t in re.split(r"[,\n]",
+                                                  rm.get("core_tags", "")):
+                                    t2 = t.strip().replace(" ", "_")
+                                    if t2 and t2 not in grp:
+                                        grp.append(t2)
+                                if grp:
+                                    trait_groups.append(grp)
+                        else:
+                            # 无角色库命中：从草稿/输入取不了官方特征，
+                            # 角色特征区退化为空（纯画面复选）
+                            trait_groups = []
                         scene_cands = char_tags.recall_candidates(
                             draft or user_input, limit=180)
-                        if (role_tags or len(scene_cands) >= 20):
+                        n_roles = len(trait_groups)
+                        if (n_roles or len(scene_cands) >= 20):
                             ctx_parts = [f"用户需求：{user_input}"]
                             if draft:
                                 ctx_parts.append(f"参考草稿：{draft}")
-                            if role_tags:
-                                ctx_parts.append(
-                                    "角色特征区（尽量多选与角色形象相符的；"
-                                    "若多个标签冲突(如不同发色/瞳色)只选最贴合的一个）：\n"
-                                    + ", ".join(role_tags))
+                            if n_roles:
+                                zone_parts = []
+                                for gi, grp in enumerate(trait_groups, 1):
+                                    label = (f"角色{gi}特征区（角色{gi}的"
+                                             "形象特征，尽量多选其中与角色"
+                                             "相符的；区内若冲突(如不同发色)"
+                                             "只选一个）")
+                                    zone_parts.append(label + "：\n"
+                                                      + ", ".join(grp))
+                                zone_text = "\n\n".join(zone_parts)
+                                if n_roles > 1:
+                                    zone_text = (
+                                        "画面包含多个角色，每个角色的特征区"
+                                        "都要尽量多选，保证两人形象完整。\n"
+                                        + zone_text)
+                                ctx_parts.append(zone_text)
                             if scene_cands:
                                 s_lo, s_hi = _scene_pick_range(draft)
                                 # 候选不足时收窄上限
@@ -878,7 +949,9 @@ def _run_generation(data: dict):
                                 ctx_parts.append(
                                     f"画面区（从画面区选 {s_lo}~{s_hi} 个标签，"
                                     "覆盖姿态/场景/服饰/氛围；"
-                                    "草稿中已合适的画面标签可保留并计入此数）：\n"
+                                    "多角色时补充 2girls/multiple_girls/"
+                                    "siblings 等人数标签；草稿已合适的画面"
+                                    "标签可保留并计入此数）：\n"
                                     + char_tags.format_candidates(scene_cands))
                             ctx = "\n\n".join(ctx_parts)
                             try:
@@ -887,21 +960,26 @@ def _run_generation(data: dict):
                                 picked = ""
                             if picked:
                                 tag_prompt = char_tags.validate_tags(picked)
-                                # 角色特征区是高优先级：若 LLM 漏掉了多个，
-                                # 把未冲突的核心特征确定性补回（双保险）
-                                if role_tags:
+                                # 角色特征高优先级兜底：每组内补回未冲突特征
+                                if trait_groups:
                                     kept = set(tag_prompt)
-                                    extra = [t for t in role_tags
-                                             if t not in kept]
-                                    # 只补回不与其他已选标签冲突的特征
-                                    for t in extra:
-                                        if not _core_tags_conflict(t,
-                                                                    tag_prompt):
-                                            tag_prompt.append(t)
+                                    for grp in trait_groups:
+                                        for t in grp:
+                                            if t in kept:
+                                                continue
+                                            # 组内已有同维度冲突特征则跳过
+                                            conflict = any(
+                                                c in kept and c in grp
+                                                and _core_tags_conflict(t, [c])
+                                                for c in grp)
+                                            if not conflict:
+                                                tag_prompt.append(t)
+                                                kept.add(t)
                                 log.info(
-                                    "[%s] 标签复选: 角色特征%d 画面%d -> 校验后%d",
-                                    gid, len(role_tags), len(scene_cands),
-                                    len(tag_prompt))
+                                    "[%s] 标签复选: %d角色特征%d 画面%d -> %d",
+                                    gid, len(trait_groups),
+                                    sum(len(g) for g in trait_groups),
+                                    len(scene_cands), len(tag_prompt))
                     if not tag_prompt:
                         # 复选关（或复选失败）：直接校验草稿，剔除不在词库的词
                         tag_prompt = char_tags.validate_tags(draft or "")
@@ -917,17 +995,32 @@ def _run_generation(data: dict):
                 if not prompt:
                     raise RuntimeError("LLM 返回了空提示词")
                 # 角色已命中但 LLM 漏输出角色标签时，前置注入（确定性兜底，
-                # 保证角色名与作品名一定进入提示词）
-                if search_info and search_info.get("query"):
-                    ctag = search_info.get("query", "").lower()
-                    main = ctag.split("(")[0].strip("_")
-                    if main and main not in prompt.lower()[:120]:
-                        cp = search_info.get("copyright", "")
-                        prompt = ((f"{search_info['query']}, {cp}, {prompt}"
-                                   if cp else
-                                   f"{search_info['query']}, {prompt}"))
-                        log.info("[%s] 角色标签缺失，已注入前缀: %s",
-                                 gid, search_info["query"])
+                # 保证每个角色名与作品名一定进入提示词）
+                if roles_meta:
+                    pl = prompt.lower()
+                    missing = []
+                    for rm in roles_meta:
+                        q = (rm.get("query") or "").lower()
+                        main = q.split("(")[0].strip("_")
+                        if not main:
+                            continue
+                        # 角色名或其主词出现在前部即视为已含
+                        if not (q in pl[:200] or main in pl[:200]):
+                            missing.append(rm)
+                    if missing:
+                        prefix_parts = []
+                        for rm in missing:
+                            seg = rm["query"]
+                            cp = rm.get("copyright", "")
+                            if cp:
+                                seg = f"{seg}, {cp}"
+                            prefix_parts.append(seg)
+                        if prefix_parts:
+                            prompt = ", ".join(prefix_parts) + ", " + prompt
+                            log.info(
+                                "[%s] 角色标签缺失，已注入前缀 %d 个: %s",
+                                gid, len(missing),
+                                [m["query"] for m in missing])
                 log.info("[%s] llm prompt ok (%d 字符)", gid, len(prompt))
                 yield {"step": "llm", "msg": "✓ 提示词已生成"}
             except Exception as e:
@@ -1100,41 +1193,62 @@ def _generation_with_task(data: dict, source: str):
 # ====================================================================== #
 @app.route("/api/resolve/role", methods=["POST"])
 def api_resolve_role():
-    """发送前角色预检：仅规则层识别（不调 LLM），返回候选列表供前端弹卡。
+    """发送前角色预检：仅规则层识别（不调 LLM），支持多角色。
 
-    body: {prompt, role?}  role 存在则只解析手动指定（不展开多候选）。
-    返回 {success, prompt, candidates: [{character, copyright, trigger,
-    core_head, via}], need_choice: bool}
+    body: {prompt, role?}
+    返回 {success, roles: [{label, candidates, need_choice}],
+          need_choice: 任一角色需选择}
+    每个角色一组候选；candidates 跨作品>1 则该角色 need_choice=True。
     """
     data = request.get_json() or {}
     text = (data.get("prompt") or "").strip()
     role = (data.get("role") or "").strip()
     if not text and not role:
         return jsonify({"success": False, "error": "缺少文本"}), 400
+
+    def _item(d: dict) -> dict:
+        core = (d.get("core_tags") or "")
+        return {
+            "character": d.get("character", ""),
+            "copyright": d.get("copyright", ""),
+            "name": d.get("name", ""),
+            "copyright_name": d.get("copyright_name", ""),
+            "trigger": (d.get("trigger") or "")[:120],
+            "core_head": ", ".join(
+                [t.strip() for t in core.split(",") if t.strip()][:12]),
+        }
+
     try:
         if role:
-            cands = char_resolver.resolve_from_text(role, strict=True)
+            # 手动指定：逗号分隔多个角色
+            groups = []
+            for seg in re.split(r"[，,]+", role):
+                seg = seg.strip()
+                if not seg:
+                    continue
+                cands = char_resolver.resolve_from_text(seg, strict=True)
+                if cands:
+                    groups.append(cands)
         else:
-            cands = char_resolver.resolve_from_text(text)
-        items = []
-        for d in (cands or [])[:5]:
-            core = (d.get("core_tags") or "")
-            head = ", ".join([t.strip() for t in core.split(",")
-                              if t.strip()][:12])
-            items.append({
-                "character": d.get("character", ""),
-                "copyright": d.get("copyright", ""),
-                "name": d.get("name", ""),
-                "copyright_name": d.get("copyright_name", ""),
-                "trigger": (d.get("trigger") or "")[:120],
-                "core_head": head,
+            groups = char_resolver.resolve_multi(text)
+
+        roles_out = []
+        any_choice = False
+        for i, cands in enumerate(groups or [], 1):
+            if not cands:
+                continue
+            items = [_item(d) for d in cands[:5]]
+            unique_cps = {d.get("copyright") for d in cands[:5]}
+            need = len(unique_cps) > 1
+            any_choice = any_choice or need
+            roles_out.append({
+                "label": f"角色{i}",
+                "need_choice": need,
+                "candidates": items,
             })
-        # need_choice: 仅当存在【跨作品】候选才弹卡（如舰C长门 vs 碧蓝长门）；
-        # 同一作品下的皮肤变体(azur_lane 的三个 nagato skin)不弹，自动取第一个。
-        unique_cps = {d.get("copyright") for d in (cands or [])}
         return jsonify({"success": True, "prompt": text,
-                        "candidates": items,
-                        "need_choice": len(unique_cps) > 1})
+                        "roles": roles_out,
+                        "need_choice": any_choice})
     except Exception as e:
         log.error("[resolve/role] %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
