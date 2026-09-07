@@ -78,10 +78,14 @@
         <span class="upscale-title">🖼 二采超分（对图库已有图 放大 + 重绘精修）</span>
       </div>
       <div class="upscale-bar-row">
-        <select id="upImgSelect" onchange="upSelChanged()" style="flex:1;min-width:140px">
-          <option value="">— 加载图库… —</option>
-        </select>
-        <img id="upSelThumb" class="up-sel-thumb hidden" alt="预览">
+        <div class="cusel" id="upCusel">
+          <div class="cusel-trigger" onclick="upCuselToggle(event)">
+            <img id="upCuselThumb" class="hidden" alt="">
+            <span id="upCuselLabel">— 加载图库… —</span>
+            <span class="cusel-arrow">▼</span>
+          </div>
+          <div id="upCuselPanel" class="cusel-panel hidden"></div>
+        </div>
         <label>放大
           <select id="upScale2">
             <option value="1">1x（仅精修）</option>
@@ -442,10 +446,11 @@ function _galleryItem(f) {
   const it = document.createElement('div');
   it.className = 'gallery-item';
   const img = document.createElement('img');
-  img.src = f.url;
   img.loading = 'lazy';
   img.alt = f.name;
   img.title = f.name;
+  // 网格缩略图走服务端缩略(w=240)，点击放大看原图
+  img.src = _upThumbUrl(f, 240);
   const nm = document.createElement('div');
   nm.className = 'gallery-name'; nm.textContent = f.name;
   it.appendChild(img); it.appendChild(nm);
@@ -526,41 +531,77 @@ async function toggleUpscaleBar() {
     document.getElementById('upscaleChatStatus').textContent = '';
   }
 }
+let _upCur = null;   // 当前选中文件对象
+function _upThumbUrl(f, w) { return f.url + (f.url.includes('?') ? '&' : '?') + 'w=' + (w || 64); }
 async function loadUpscaleSelect(force) {
-  const sel = document.getElementById('upImgSelect');
+  const panel = document.getElementById('upCuselPanel');
+  const label = document.getElementById('upCuselLabel');
   try {
     const r = await fetch('/api/gallery?limit=100');
     const d = await r.json();
     if (!d.success || !d.files) throw new Error(d.error || '图库加载失败');
     _upList = {};
-    sel.innerHTML = '';
+    _upCur = null;
+    panel.innerHTML = '';
     for (const f of d.files) {
       _upList[f.name] = f;
-      const o = document.createElement('option');
-      o.value = f.name; o.textContent = f.name;
-      sel.appendChild(o);
+      const it = document.createElement('div');
+      it.className = 'cusel-item'; it.dataset.name = f.name;
+      const im = document.createElement('img');
+      im.src = _upThumbUrl(f, 64); im.loading = 'lazy'; im.alt = '';
+      const sp = document.createElement('span'); sp.textContent = f.name;
+      it.appendChild(im); it.appendChild(sp);
+      it.onclick = () => { upCuselPick(f.name); upCuselToggle(); };
+      panel.appendChild(it);
     }
     if (d.files.length === 0) {
-      sel.innerHTML = '<option value="">图库暂无图片</option>';
+      panel.innerHTML = '<div class="cusel-empty">图库暂无图片，先生成几张吧</div>';
+      label.textContent = '— 图库为空 —';
+      return;
     }
-    upSelChanged();
+    // 默认选中最新（列表第一项）
+    _upCur = d.files[0];
+    _upRender();
   } catch (e) {
-    sel.innerHTML = '<option value="">加载失败: ' + e.message + '</option>';
+    label.textContent = '加载失败';
+    panel.innerHTML = '<div class="cusel-empty">' + e.message + '</div>';
   }
 }
-function upSelChanged() {
-  const sel = document.getElementById('upImgSelect');
-  const th = document.getElementById('upSelThumb');
-  const f = sel.value && _upList ? _upList[sel.value] : null;
-  if (f) { th.classList.remove('hidden'); th.src = f.url; }
-  else { th.classList.add('hidden'); th.src = ''; }
+function _upRender() {
+  const label = document.getElementById('upCuselLabel');
+  const th = document.getElementById('upCuselThumb');
+  const panel = document.getElementById('upCuselPanel');
+  if (_upCur) {
+    label.textContent = _upCur.name;
+    th.classList.remove('hidden');
+    th.src = _upThumbUrl(_upCur, 64);
+    [...panel.querySelectorAll('.cusel-item')].forEach(el =>
+      el.classList.toggle('cur', el.dataset.name === _upCur.name));
+  } else {
+    label.textContent = '— 请选择图片 —';
+    th.classList.add('hidden'); th.src = '';
+  }
 }
+function upCuselPick(name) {
+  if (_upList && _upList[name]) _upCur = _upList[name];
+  _upRender();
+}
+function upCuselToggle() {
+  const panel = document.getElementById('upCuselPanel');
+  panel.classList.toggle('hidden');
+}
+document.addEventListener('click', function(e) {
+  const c = document.getElementById('upCusel');
+  if (c && !c.contains(e.target)) {
+    const panel = document.getElementById('upCuselPanel');
+    if (panel) panel.classList.add('hidden');
+  }
+});
 async function upscaleFromChat() {
-  const sel = document.getElementById('upImgSelect');
   const status = document.getElementById('upscaleChatStatus');
   const btn = document.getElementById('upRunBtn2');
-  const f = sel.value && _upList ? _upList[sel.value] : null;
-  if (!f) { status.textContent = '请先从下拉框选择一张图'; return; }
+  const f = _upCur;
+  if (!f) { status.textContent = '请先选择一张图片'; return; }
   const scale = parseFloat(document.getElementById('upScale2').value);
   const denoise = parseFloat(document.getElementById('upDenoise2').value);
   btn.disabled = true; btn.textContent = '⏳ 二采中…';
@@ -581,11 +622,8 @@ async function upscaleFromChat() {
     addChatBubble('assistant', `二采超分: ${f.name} (${scale}x)`, cacheBust, null, chatLog.length - 1);
     // 刷新图库下拉（新图加入）+ 自动切到最新
     await loadUpscaleSelect(false);
-    const nsel = document.getElementById('upImgSelect');
-    if (_upList && _upList[d.image.split('/').pop()]) {
-      nsel.value = d.image.split('/').pop();
-    }
-    upSelChanged();
+    const newName = d.image.split('/').pop();
+    if (_upList && _upList[newName]) upCuselPick(newName);
     showImageModal(cacheBust);
     switchTab('chat');
   } catch (e) {

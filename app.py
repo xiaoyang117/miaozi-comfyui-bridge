@@ -1596,7 +1596,11 @@ def api_gallery():
 
 @app.route("/api/gallery/img")
 def api_gallery_img():
-    """从工具本地 outputs 目录读图（按相对路径，防目录穿越）。"""
+    """从工具本地 outputs 目录读图（按相对路径，防目录穿越）。
+
+    支持 ?w=<px> 服务端缩略（等比、最长边限宽），用于下拉/网格预览，
+    大幅减少加载体积；不带 w 返回原图。
+    """
     f = (request.args.get("f") or "").strip()
     root = OUTPUTS_DIR
     if not root.is_dir() or not f:
@@ -1607,6 +1611,27 @@ def api_gallery_img():
             return "not found", 404
     except Exception:
         return "not found", 404
+    w = request.args.get("w")
+    if w and w.isdigit() and 16 <= int(w) <= 400:
+        try:
+            from PIL import Image
+            with Image.open(full) as im:
+                im.load()
+                if im.mode in ("RGBA", "P", "LA"):
+                    im = im.convert("RGB")
+                maxw = int(w)
+                if max(im.size) > maxw:
+                    im.thumbnail((maxw, maxw), Image.LANCZOS)
+                import io as _io
+                buf = _io.BytesIO()
+                im.save(buf, format="JPEG", quality=80)
+                buf.seek(0)
+                resp = Response(buf.read(), mimetype="image/jpeg")
+                resp.headers["Cache-Control"] = "public, max-age=86400"
+                return resp
+        except Exception as e:
+            log.warning("[gallery/img] 缩略失败 %s: %s", f, e)
+            return send_file(full)
     return send_file(full)
 
 

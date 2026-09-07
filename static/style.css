@@ -680,3 +680,23 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .upscale-bar-row select, .upscale-bar-row button { font-size: .78rem; padding: 3px 6px; }
 .up-sel-thumb { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-elev-2); }
 .upscale-chat-status { font-size: .74rem; color: var(--text-faint); min-height: 1em; }
+
+/* ================= 带预览图的下拉(二采选图) ================= */
+.cusel { position: relative; flex: 1; min-width: 150px; }
+.cusel-trigger { display: flex; align-items: center; gap: 6px; padding: 3px 8px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elev-2);
+  font-size: .76rem; cursor: pointer; min-height: 30px; max-width: 100%; }
+.cusel-trigger img { width: 26px; height: 26px; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
+.cusel-trigger span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.cusel-arrow { color: var(--text-faint); font-size: .7rem; }
+.cusel-panel { position: absolute; z-index: 60; top: calc(100% + 4px); left: 0; right: 0;
+  background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: 8px;
+  max-height: 300px; overflow-y: auto; box-shadow: 0 8px 24px rgba(0,0,0,.45); }
+.cusel-panel.hidden { display: none; }
+.cusel-item { display: flex; align-items: center; gap: 8px; padding: 4px 8px; cursor: pointer; }
+.cusel-item:hover, .cusel-item.cur { background: var(--accent-soft, #262f44); }
+.cusel-item img { width: 40px; height: 40px; object-fit: cover; border-radius: 4px;
+  background: var(--bg); flex-shrink: 0; }
+.cusel-item span { font-size: .72rem; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; flex: 1; }
+.cusel-empty { padding: 8px; font-size: .74rem; color: var(--text-faint); }
