@@ -263,6 +263,34 @@ def _core_tags_conflict(tag: str, chosen: list[str]) -> bool:
     return False
 
 
+# 画面标签选取数量随草稿丰富度变化：草稿越长（需求越复杂），画面区需补的越多。
+# 以草稿的"标签段数"为指标：按逗号/换行切段，纯英文自然语言按单词粗算。
+def _scene_pick_range(draft: str | None) -> tuple[int, int]:
+    """根据草稿长度估算画面区应选标签数区间 (lo, hi)。
+
+    映射（标签段数 n）：
+      n<=2   -> 2~5   极简需求(只有角色名), 少量画面点缀
+      n<=8   -> 4~8   简单需求
+      n<=16  -> 7~12  中等
+      其它    -> 10~16 复杂需求
+    """
+    if not draft or not draft.strip():
+        return 8, 15
+    segs = [s.strip() for s in re.split(r"[,\n]", draft) if s.strip()]
+    # 若切出来的段数很少但草稿很长（自然语言长句），按单词数粗估
+    n = len(segs)
+    total_chars = len(draft)
+    if n <= 3 and total_chars > 60:
+        n = min(20, max(n, total_chars // 12))
+    if n <= 2:
+        return 2, 5
+    if n <= 8:
+        return 4, 8
+    if n <= 16:
+        return 7, 12
+    return 10, 16
+
+
 def _looks_like_tag(s: str) -> bool:
     """判断字符串是否为纯 danbooru 标签样式（英文/数字/下划线/括号/逗号）。"""
     import re as _re
@@ -844,9 +872,13 @@ def _run_generation(data: dict):
                                     "若多个标签冲突(如不同发色/瞳色)只选最贴合的一个）：\n"
                                     + ", ".join(role_tags))
                             if scene_cands:
+                                s_lo, s_hi = _scene_pick_range(draft)
+                                # 候选不足时收窄上限
+                                s_hi = min(s_hi, len(scene_cands))
                                 ctx_parts.append(
-                                    "画面区（从中选 8~15 个，覆盖姿态/场景/"
-                                    "服饰/氛围）：\n"
+                                    f"画面区（从画面区选 {s_lo}~{s_hi} 个标签，"
+                                    "覆盖姿态/场景/服饰/氛围；"
+                                    "草稿中已合适的画面标签可保留并计入此数）：\n"
                                     + char_tags.format_candidates(scene_cands))
                             ctx = "\n\n".join(ctx_parts)
                             try:
