@@ -137,6 +137,7 @@ def make_llm() -> LLMClient:
         api_key=settings.llm_api_key,
         model=settings.llm_model,
         custom_system_prompt=settings.custom_system_prompt,
+        thinking=settings.llm_thinking,
     )
 
 
@@ -786,7 +787,8 @@ def test_llm():
             api_key=data.get("llm_api_key") or settings.llm_api_key,
             model=data.get("llm_model") or settings.llm_model,
             custom_system_prompt=(data.get("custom_system_prompt")
-                                  or settings.custom_system_prompt))
+                                  or settings.custom_system_prompt),
+            thinking=settings.llm_thinking)
         result = llm._call(llm._prompt_system,
                            "a cat sitting on a windowsill", [])
         return jsonify({"success": True, "prompt": result})

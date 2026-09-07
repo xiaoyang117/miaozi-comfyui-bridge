@@ -151,6 +151,10 @@
       <input id="s_llm_api_key" type="password" oncopy="return false" oncut="return false" placeholder="无鉴权可留空">
       <label>模型名称</label>
       <input id="s_llm_model" placeholder="qwen2.5:7b">
+      <label class="toggle-line" title="Qwen3 等推理模型默认会先思考再回答。关闭=生成快速稳定（推荐生图用）；开启=推理更充分但可能慢/超时">
+        <input type="checkbox" id="s_llm_thinking" style="width:auto">
+        LLM 思考模式（Qwen3 推理，更慢）
+      </label>
       <div class="btn-inline-row">
         <button class="btn-secondary" onclick="testLLM()">测试连接</button>
         <button class="btn-secondary" onclick="testLLMRaw()">原始响应</button>
@@ -1632,6 +1636,7 @@ async function loadSettings(silent) {
       $('s_llm_base_url').value = s.llm_base_url||'';
       $('s_llm_api_key').value = s.llm_api_key||'';
       $('s_llm_model').value = s.llm_model||'';
+      $('s_llm_thinking').checked = !!s.llm_thinking;
       $('s_vlm_base_url').value = s.vlm_base_url||'';
       $('s_vlm_api_key').value = s.vlm_api_key||'';
       $('s_vlm_model').value = s.vlm_model||'';
@@ -1662,6 +1667,7 @@ async function saveSettings() {
     llm_base_url: $('s_llm_base_url').value.trim(),
     llm_api_key: $('s_llm_api_key').value.trim(),
     llm_model: $('s_llm_model').value.trim(),
+    llm_thinking: $('s_llm_thinking').checked,
     vlm_base_url: $('s_vlm_base_url').value.trim(),
     vlm_api_key: $('s_vlm_api_key').value.trim(),
     vlm_model: $('s_vlm_model').value.trim(),

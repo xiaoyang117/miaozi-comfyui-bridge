@@ -103,10 +103,11 @@ PROMPT_MULTI_ROLE_SPECIFIC = (
 
 class LLMClient:
     def __init__(self, base_url: str = "", api_key: str = "", model: str = "",
-                 custom_system_prompt: str = ""):
+                 custom_system_prompt: str = "", thinking: bool = False):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
+        self.thinking = bool(thinking)
         self._prompt_system = custom_system_prompt.strip() or PROMPT_SYSTEM
         # 最近一次请求的真实 token 用量（OpenAI 兼容 usage，可能为 None）
         self.last_usage: dict | None = None
@@ -145,9 +146,9 @@ class LLMClient:
             "temperature": 0.1,
         }
         # Qwen3 等推理模型默认开启"思考模式"：生成式任务（草稿/复选）不带
-        # max_tokens 时模型可能长时间思考导致请求超时/不稳定。尝试通过
-        # chat_template_kwargs 关闭 thinking（llama.cpp 支持）；若服务端
-        # 不认此参数（报错），回退到不带该参数的请求重试一次。
+        # max_tokens 时模型可能长时间思考导致请求超时/不稳定。
+        # thinking=False（默认，配置页可改）→ 通过 chat_template_kwargs 关闭
+        # thinking；若服务端不认此参数（报错），回退到不带该参数的请求重试一次。
 
         # Sanity check: strip any remaining image refs
         body_str = json.dumps(body)
@@ -164,7 +165,9 @@ class LLMClient:
             return _sess.post(url, headers=headers, json=b, timeout=120)
 
         try:
-            body["chat_template_kwargs"] = {"enable_thinking": False}
+            if not self.thinking:
+                # 关闭思考：让 llama.cpp 跳过推理过程直接输出（快速稳定）
+                body["chat_template_kwargs"] = {"enable_thinking": False}
             resp = _do_post(body)
         except requests.exceptions.ConnectionError:
             raise RuntimeError(f"无法连接到 LLM API ({self.base_url})")
@@ -174,7 +177,8 @@ class LLMClient:
                 "或确认模型服务未被其他任务占满")
         # 服务端若不支持 chat_template_kwargs（如部分 OpenAI 兼容网关）
         # 会返回 4xx；此时去掉该参数原样重试一次
-        if not resp.ok and resp.status_code in (400, 422, 500):
+        if (not self.thinking and not resp.ok
+                and resp.status_code in (400, 422, 500)):
             low = resp.text.lower()
             if ("chat_template_kwargs" in low or "enable_thinking" in low
                     or "unrecognized" in low or "unknown argument" in low

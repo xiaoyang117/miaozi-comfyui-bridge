@@ -16,6 +16,10 @@ DEFAULT_SETTINGS = {
     "llm_api_key": "",
     "llm_model": "qwen2.5:7b",
     "custom_system_prompt": "",
+    # LLM 思考模式：Qwen3 等推理模型默认会"先思考再回答"——思考时长短则几秒、
+    # 长则数分钟(生成类任务无 max_tokens 时可能卡到超时)。默认 False=关闭思考
+    # (快速稳定)；需要复杂推理时可开 True(更慢但可能更聪明)。
+    "llm_thinking": False,
 
     # ---- VLM（图片识别）----
     "vlm_base_url": "",
@@ -138,6 +142,10 @@ class Settings:
     @property
     def custom_system_prompt(self) -> str:
         return str(self._data.get("custom_system_prompt", ""))
+
+    @property
+    def llm_thinking(self) -> bool:
+        return bool(self._data.get("llm_thinking", False))
 
     @property
     def vlm_base_url(self) -> str:
