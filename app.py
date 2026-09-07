@@ -18,7 +18,7 @@ from pathlib import Path
 
 import requests as _req
 from flask import (Flask, Response, jsonify, render_template, request,
-                   send_from_directory, stream_with_context)
+                   send_file, send_from_directory, stream_with_context)
 
 from character_lookup.query import is_built, lookup as char_lookup
 from character_lookup import resolver as char_resolver
@@ -1525,6 +1525,135 @@ def generate_sync():
         "size": result.get("size"),
         "vlm": result.get("vlm"),
     })
+
+
+# ====================================================================== #
+# 图库 / 二采（超分）
+# ====================================================================== #
+_GALLERY_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+
+
+@app.route("/api/gallery", methods=["GET"])
+def api_gallery():
+    """列出 ComfyUI output 目录的历史图片（全历史图库）。
+
+    query: ?offset=&limit=&sub=&q=   sub=搜索子目录(如 anima base/);
+    返回 {files: [{name, url, mtime}], total, offset, limit, root}
+    """
+    root = Path(settings.comfyui_output_dir or "")
+    if not root.is_dir():
+        return jsonify({"success": False,
+                        "error": "未配置 ComfyUI output 目录",
+                        "files": [], "total": 0}), 200
+    offset = max(0, int(request.args.get("offset", 0) or 0))
+    limit = min(200, max(1, int(request.args.get("limit", 60) or 60)))
+    sub = (request.args.get("sub") or "").strip()
+    q = (request.args.get("q") or "").strip().lower()
+    base = root / sub if sub else root
+    files = []
+    if base.is_dir():
+        for p in base.iterdir():
+            if p.suffix.lower() in _GALLERY_EXTS:
+                nm = p.name
+                if q and q not in nm.lower():
+                    continue
+                rel = (p.relative_to(root)).as_posix() if sub else nm
+                files.append({
+                    "name": nm,
+                    "path": rel,
+                    "sub": sub,
+                    "mtime": p.stat().st_mtime,
+                    "url": f"/api/gallery/img?f={rel}",
+                })
+    files.sort(key=lambda x: x["mtime"], reverse=True)
+    total = len(files)
+    return jsonify({
+        "success": True,
+        "files": files[offset:offset + limit],
+        "total": total, "offset": offset, "limit": limit, "root": str(root),
+    })
+
+
+@app.route("/api/gallery/img")
+def api_gallery_img():
+    """从 ComfyUI output 目录读图（按相对路径，防目录穿越）。"""
+    f = (request.args.get("f") or "").strip()
+    root = Path(settings.comfyui_output_dir or "")
+    if not root.is_dir() or not f:
+        return "not found", 404
+    try:
+        full = (root / f).resolve()
+        if not str(full).startswith(str(root.resolve())) or not full.is_file():
+            return "not found", 404
+    except Exception:
+        return "not found", 404
+    return send_file(full)
+
+
+@app.route("/api/upscale", methods=["POST"])
+def api_upscale():
+    """对 ComfyUI output 目录的一张历史图做二采（img2img 放大重采样）。
+
+    body: {file: "相对路径/xxx.png", prompt?: "额外提示",
+           scale?: float(默认2), denoise?: float(默认0.5), seed?: int}
+    返回 {success, image: 本地 outputs 下新图 URL}
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    rel = (data.get("file") or "").strip()
+    if not rel:
+        return jsonify({"success": False, "error": "缺少图片路径"}), 400
+    root = Path(settings.comfyui_output_dir or "")
+    try:
+        src = (root / rel).resolve()
+        if not str(src).startswith(str(root.resolve())) or not src.is_file():
+            return jsonify({"success": False,
+                            "error": "图片不在 ComfyUI output 目录"}), 400
+    except Exception:
+        return jsonify({"success": False,
+                        "error": "图片路径无效"}), 400
+
+    scale = float(data.get("scale", 2.0) or 2.0)
+    denoise = float(data.get("denoise", 0.5) or 0.5)
+    seed = data.get("seed")
+    extra_prompt = (data.get("prompt") or "").strip()
+    scale = min(4.0, max(1.0, scale))
+    denoise = min(1.0, max(0.1, denoise))
+
+    # 上传到 ComfyUI input（安全文件名）
+    import time as _t
+    safe = f"up_{int(_t.time()*1000)}_{src.name}"
+    cli = make_comfy()   # 独立实例，避免与生成任务抢会话
+    try:
+        ok = cli.upload_image(src.read_bytes(), safe)
+    except Exception as e:
+        log.error("[upscale] 读图失败: %s", e)
+        return jsonify({"success": False, "error": f"读图失败: {e}"}), 500
+    if not ok:
+        return jsonify({"success": False,
+                        "error": "上传图片到 ComfyUI 失败（检查服务）"}), 500
+
+    try:
+        wf = load_workflow("MIAOMIAO img2img.json")
+    except Exception as e:
+        log.error("[upscale] 模板加载失败: %s", e)
+        return jsonify({"success": False,
+                        "error": f"img2img 模板加载失败: {e}"}), 500
+
+    try:
+        path = cli.generate_img2img(
+            wf, extra_prompt, safe, scale=scale, denoise=denoise,
+            seed=int(seed) if seed else None,
+            progress_cb=None)
+    except Exception as e:
+        log.error("[upscale] 二采执行失败: %s", e)
+        return jsonify({"success": False,
+                        "error": f"二采执行失败: {e}"}), 500
+    if not path:
+        return jsonify({"success": False,
+                        "error": "二采完成但未获取到图片"}), 500
+    return jsonify({"success": True,
+                    "image": f"/outputs/{path.name}",
+                    "scale": scale, "denoise": denoise})
 
 
 @app.route("/api/health", methods=["GET"])

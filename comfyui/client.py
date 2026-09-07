@@ -118,6 +118,69 @@ class ComfyUIClient:
     # ------------------------------------------------------------------ #
     # 提交与轮询
     # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    # 图片上传 / img2img 二采
+    # ------------------------------------------------------------------ #
+    def upload_image(self, file_bytes: bytes, filename: str) -> bool:
+        """把图片上传到 ComfyUI input 目录（POST /upload/image）。
+
+        filename 仅取 basename，需为安全文件名（app 层负责生成）。
+        返回是否成功。
+        """
+        import os as _os
+        safe = _os.path.basename(filename or "")
+        if not safe:
+            return False
+        try:
+            r = self._session.post(
+                f"{self.server_url}/upload/image",
+                files={"image": (safe, file_bytes,
+                                 "image/png")},
+                data={"overwrite": "true"},
+                timeout=60)
+            return r.status_code == 200
+        except requests.RequestException as e:
+            log.warning("上传图片到 ComfyUI 失败: %s", e)
+            return False
+
+    def generate_img2img(self, workflow: dict, prompt: str,
+                         input_filename: str,
+                         scale: float = 2.0, denoise: float = 0.5,
+                         seed: Optional[int] = None,
+                         placeholder: str = "UPSCALE_PROMPT_PH",
+                         progress_cb=None) -> Optional[Path]:
+        """img2img 二采：替换模板占位符 -> 设置放大/denoise/输入图 -> 提交下载。
+
+        模板约定：
+          - LoadImage.image  = "INPUT_IMAGE_PH"
+          - ImageScaleBy.scale_by = 数值 2.0
+          - KSampler.denoise = 数值 0.5
+          - KSampler.seed    = 数值（0 = 随机）
+        """
+        import copy
+        wf = copy.deepcopy(workflow)
+        for nid, node in wf.items():
+            inputs = node.get("inputs")
+            if not isinstance(inputs, dict):
+                continue
+            ct = node.get("class_type", "")
+            for k, v in inputs.items():
+                if isinstance(v, str) and placeholder in v:
+                    inputs[k] = v.replace(placeholder, prompt or "")
+                elif k == "image" and v == "INPUT_IMAGE_PH":
+                    inputs[k] = input_filename
+                elif ct == "ImageScaleBy" and k == "scale_by":
+                    inputs[k] = float(scale)
+                elif ct == "KSampler" and k == "denoise":
+                    inputs[k] = float(denoise)
+                elif ct == "KSampler" and k == "seed":
+                    inputs[k] = int(seed if seed is not None
+                                    else 0) or 0
+        prompt_id = self.submit(wf)
+        node_ids = self._detect_image_node_ids(wf)
+        return self._wait_and_download(prompt_id, node_ids,
+                                       progress_cb=progress_cb)
+
     def submit(self, workflow: dict) -> str:
         resp = self._session.post(
             f"{self.server_url}/prompt",
@@ -203,9 +266,14 @@ class ComfyUIClient:
 
     def _wait_and_download(self, prompt_id: str,
                            node_ids: list,
-                           progress_cb=None) -> Optional[Path]:
+                           progress_cb=None,
+                           timeout: float = 600) -> Optional[Path]:
+        """等待 ComfyUI 执行完成并下载图片。
+
+        timeout 默认 600 秒：img2img 放大 + 重采样在图较大时偏慢，
+        300 秒容易误杀；普通文生图通常 1~2 分钟内完成。
+        """
         start = time.time()
-        timeout = 300
         if progress_cb:
             progress_cb(f"已提交 ComfyUI，排队等待执行…")
         while time.time() - start < timeout:
