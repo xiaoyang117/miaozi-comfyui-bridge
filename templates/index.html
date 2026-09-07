@@ -78,6 +78,11 @@
         <span class="upscale-title">🖼 二采超分（对图库已有图 放大 + 重绘精修）</span>
       </div>
       <div class="upscale-bar-row">
+        <label>工作流
+          <select id="upWorkflow" title="二采使用的 img2img 工作流模板（仅列出带图像入口的）">
+            <option value="">…</option>
+          </select>
+        </label>
         <div class="cusel" id="upCusel">
           <div class="cusel-trigger" onclick="upCuselToggle(event)">
             <img id="upCuselThumb" class="hidden" alt="">
@@ -520,12 +525,35 @@ function gallerySelect(f) {
 
 // ================= 对话页二采（开关 + 下拉选图） =================
 let _upList = null;   // 图库文件缓存 {name: f}
+async function loadUpWorkflows() {
+  const sel = document.getElementById('upWorkflow');
+  try {
+    const r = await fetch('/api/upscale/workflows');
+    const d = await r.json();
+    if (!d.success || !d.files || !d.files.length) {
+      sel.innerHTML = '<option value="">无 img2img 模板</option>';
+      return;
+    }
+    const prev = sel.dataset.cur || '';
+    sel.innerHTML = '';
+    for (const f of d.files) {
+      const o = document.createElement('option');
+      o.value = f; o.textContent = f;
+      sel.appendChild(o);
+    }
+    // 保持上次选择（或默认第一个=单二采）
+    if (prev && d.files.includes(prev)) sel.value = prev;
+    sel.dataset.cur = sel.value;
+  } catch (e) {
+    sel.innerHTML = '<option value="">模板加载失败</option>';
+  }
+}
 async function toggleUpscaleBar() {
   const on = document.getElementById('useUpscale').checked;
   const bar = document.getElementById('upscaleBar');
   if (on) {
     bar.classList.remove('hidden');
-    await loadUpscaleSelect(true);
+    await Promise.all([loadUpWorkflows(), loadUpscaleSelect(true)]);
   } else {
     bar.classList.add('hidden');
     document.getElementById('upscaleChatStatus').textContent = '';
@@ -604,20 +632,21 @@ async function upscaleFromChat() {
   if (!f) { status.textContent = '请先选择一张图片'; return; }
   const scale = parseFloat(document.getElementById('upScale2').value);
   const denoise = parseFloat(document.getElementById('upDenoise2').value);
+  const wf = document.getElementById('upWorkflow').value || 'MIAOMIAO 单二采.json';
   btn.disabled = true; btn.textContent = '⏳ 二采中…';
-  status.textContent = `二采中：${f.name} → ${scale}x / 幅度 ${denoise}（30~120 秒）…`;
+  status.textContent = `二采中：${f.name} → ${scale}x / 幅度 ${denoise}（${wf}，30~120 秒）…`;
   try {
     const r = await fetch('/api/upscale', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ file: f.path, scale, denoise }),
+      body: JSON.stringify({ file: f.path, scale, denoise, workflow: wf }),
     });
     const d = await r.json();
     if (!d.success) throw new Error(d.error || '二采失败');
     status.textContent = `✅ 完成（${scale}x, denoise ${denoise}）`;
     // 作为助手气泡插入对话
     const cacheBust = d.image + '?cb=' + Date.now();
-    chatHistory.push({ role: 'assistant', content: `二采超分: ${f.name} (${scale}x)` });
-    chatLog.push({ role: 'assistant', text: `二采超分: ${f.name} (${scale}x)`, imageUrl: d.image, search: null, vlm: null, size: null });
+    chatHistory.push({ role: 'assistant', content: `二采超分: ${f.name} (${scale}x, ${wf})` });
+    chatLog.push({ role: 'assistant', text: `二采超分: ${f.name} (${scale}x, ${wf})`, imageUrl: d.image, search: null, vlm: null, size: null });
     saveChatLog();
     addChatBubble('assistant', `二采超分: ${f.name} (${scale}x)`, cacheBust, null, chatLog.length - 1);
     // 刷新图库下拉（新图加入）+ 自动切到最新

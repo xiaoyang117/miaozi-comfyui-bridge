@@ -237,6 +237,36 @@ def load_workflow(path: str = None) -> dict:
     return ComfyUIClient.load_workflow(str(cand))
 
 
+def list_img2img_workflows() -> list[str]:
+    """列出 workflows 目录中可作为二采(img2img)模板的工作流文件名。
+
+    判定：API 格式（每个节点含 class_type）且包含 LoadImage 节点
+    （说明它带"吃图"入口，能作为二采模板）。文生图模板(EmptyLatentImage)
+    会被自动排除。
+    """
+    out = []
+    if not WORKFLOWS_DIR.is_dir():
+        return out
+    for p in sorted(WORKFLOWS_DIR.glob("*.json"),
+                    key=lambda x: x.name.lower()):
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(d, dict):
+            continue
+        has_load = False
+        for nid, node in d.items():
+            if not isinstance(node, dict):
+                continue
+            if node.get("class_type") == "LoadImage":
+                has_load = True
+                break
+        if has_load:
+            out.append(p.name)
+    return out
+
+
 # ====================================================================== #
 # 角色候选格式化 / LLM 翻译兜底
 # ====================================================================== #
@@ -1635,6 +1665,17 @@ def api_gallery_img():
     return send_file(full)
 
 
+@app.route("/api/upscale/workflows", methods=["GET"])
+def api_upscale_workflows():
+    """列出可作二采的 img2img 工作流模板（供前端下拉选择）。"""
+    try:
+        files = list_img2img_workflows()
+    except Exception as e:
+        log.error("[upscale/workflows] %s", e)
+        return jsonify({"success": False, "error": str(e)}), 500
+    return jsonify({"success": True, "files": files})
+
+
 @app.route("/api/upscale", methods=["POST"])
 def api_upscale():
     """对工具 outputs 目录的一张已生成图做二采（img2img 放大重采样）。
@@ -1677,8 +1718,15 @@ def api_upscale():
         return jsonify({"success": False,
                         "error": "上传图片到 ComfyUI 失败（检查服务）"}), 500
 
+    # 二采模板：body.workflow 可选（img2img 模板文件名），默认单二采
+    wf_name = (data.get("workflow") or "").strip() or "MIAOMIAO 单二采.json"
+    if wf_name not in list_img2img_workflows():
+        return jsonify({"success": False,
+                        "error": f"模板 {wf_name} 不是可用的 img2img 模板"
+                                 f"（可用: {list_img2img_workflows()}）"}), 400
+
     try:
-        wf = load_workflow("MIAOMIAO 单二采.json")
+        wf = load_workflow(wf_name)
     except Exception as e:
         log.error("[upscale] 模板加载失败: %s", e)
         return jsonify({"success": False,
