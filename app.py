@@ -263,6 +263,79 @@ def _core_tags_conflict(tag: str, chosen: list[str]) -> bool:
     return False
 
 
+def _slugify_tag(t: str) -> str:
+    """规范化标签为词库 slug（小写下划线）。"""
+    return t.strip().lower().replace(" ", "_").strip("_")
+
+
+def _arrange_multirole(tag_list: list[str],
+                       roles_meta: list[dict]) -> str:
+    """多角色时按角色分块重排提示词，让特征贴着自己的角色名，
+    减少 SD/Qwen 系模型跨角色串特征。
+
+    结构： 角色1名+版权, 角色1专属特征,
+           角色2名+版权, 角色2专属特征,
+           公共特征(≥2角色共有),
+           其余画面标签,
+           位置锚定(左/右)。
+    单角色时不重排，返回原顺序逗号串。
+    """
+    if not tag_list:
+        return ""
+    if len(roles_meta) < 2:
+        return ", ".join(tag_list)
+
+    # 每个角色的特征集（规范化 slug）
+    role_sets = []
+    for rm in roles_meta:
+        s = set()
+        for t in re.split(r"[,\n]", rm.get("core_tags", "")):
+            t2 = _slugify_tag(t)
+            if t2:
+                s.add(t2)
+        role_sets.append(s)
+
+    # 归类 tag_list 中每个元素
+    uniq_head = []   # 唯一特征(仅1角色有)
+    shared = []      # 公共特征(多角色共有)
+    rest = []        # 不属于任何角色的(画面/姿态等)
+    for tg in tag_list:
+        s2 = _slugify_tag(tg)
+        owners = [i for i, s in enumerate(role_sets) if s2 in s]
+        if len(owners) >= 2:
+            shared.append(tg)
+        elif len(owners) == 1:
+            uniq_head.append((owners[0], tg))
+        else:
+            rest.append(tg)
+
+    # 组装：按角色顺序收集"该角色的特征"
+    blocks = []
+    for i, rm in enumerate(roles_meta):
+        parts = [rm.get("query", "")]
+        cp = rm.get("copyright", "")
+        if cp and cp.lower() not in (rm.get("query", "").lower()):
+            parts.append(cp)
+        # 该角色的专属特征（保持词库/输出顺序）
+        own = [tg for (oi, tg) in uniq_head if oi == i]
+        # 若该角色没有任何专属特征残留（全被当公共），至少保证角色名在
+        blocks.append(", ".join(parts + own))
+
+    # 公共特征、画面标签
+    tail = shared + rest
+    if tail:
+        blocks.append(", ".join(tail))
+    text = ", ".join(blocks)
+
+    # 位置锚定：仅两角色，按出现顺序左/右描述（引导不串位）
+    if len(roles_meta) == 2:
+        r1 = roles_meta[0].get("query", "").split("(")[0].strip("_")
+        r2 = roles_meta[1].get("query", "").split("(")[0].strip("_")
+        if r1 and r2 and r1 != r2:
+            text = f"{text}, {r1} on the left, {r2} on the right"
+    return text
+
+
 # 画面标签选取数量随草稿丰富度变化：草稿越长（需求越复杂），画面区需补的越多。
 # 以草稿的"标签段数"为指标：按逗号/换行切段，纯英文自然语言按单词粗算。
 def _scene_pick_range(draft: str | None) -> tuple[int, int]:
@@ -988,7 +1061,11 @@ def _run_generation(data: dict):
 
                 if tag_prompt:
                     # 校验/复选出的真实标签作为提示词主体
-                    prompt = ", ".join(tag_prompt)
+                    # 多角色时按角色分块（特征贴角色名）防串
+                    if len(roles_meta) >= 2:
+                        prompt = _arrange_multirole(tag_prompt, roles_meta)
+                    else:
+                        prompt = ", ".join(tag_prompt)
                 else:
                     # 回退：草稿原样使用（词库不可用/总开关关/校验全被剔）
                     prompt = draft or ""
@@ -1005,7 +1082,7 @@ def _run_generation(data: dict):
                         if not main:
                             continue
                         # 角色名或其主词出现在前部即视为已含
-                        if not (q in pl[:200] or main in pl[:200]):
+                        if not (q in pl[:250] or main in pl[:250]):
                             missing.append(rm)
                     if missing:
                         prefix_parts = []
@@ -1136,16 +1213,18 @@ def _run_generation(data: dict):
 # 标签复选系统提示词：要求 LLM 参考草稿、从【角色特征区】尽量多选、
 # 从【画面区】挑选画面标签，不得新增区外词。
 TAG_SELECT_SYSTEM = (
-    "你是一个 danbooru 标签选择器。用户给出画面需求、参考草稿和两个候选区。\n"
+    "你是一个 danbooru 标签选择器。用户给出画面需求、参考草稿和多个候选区。\n"
     "请从中挑选标签组成最终提示词。\n"
     "要求：\n"
     "1. 只输出选中标签的英文名，逗号+空格分隔，不要序号不要解释\n"
-    "2. 【角色特征区】应尽量多选：与角色形象相符的特征全部保留\n"
-    "   （如发色/瞳色/服装/种族特征）；若区内出现冲突选项\n"
-    "   （如不同发色或不同瞳色），只选最贴合的一个\n"
-    "3. 【画面区】选 8~15 个，覆盖姿态、场景、服饰、氛围\n"
-    "4. 全部标签必须来自两个候选区，禁止输出区外任何词\n"
-    "5. 若草稿来自历史对话延续（历史是泳装、本次加海边），"
+    "2. 有多个【角色N特征区】时：先输出 角色名标签, 再紧跟该角色的"
+    "特征标签，然后下一个角色，依此类推——每个角色的特征必须紧跟自己的角色名，"
+    "绝不能混在别的角色后面（这决定画面角色特征是否正确不串）\n"
+    "3. 每个特征区内尽量多选，冲突项(如不同发色)只选最贴合的一个\n"
+    "4. 【画面区】按提示选取数量，覆盖姿态/场景/服饰/氛围，"
+    "多角色时补充 2girls/multiple_girls 等人数标签\n"
+    "5. 全部标签必须来自候选区，禁止输出区外任何词\n"
+    "6. 若草稿来自历史对话延续（历史是泳装、本次加海边），"
     "沿用仍适用的标签并补入新场景标签"
 )
 
