@@ -1423,6 +1423,7 @@ def _generation_with_task(data: dict, source: str):
             step = ev.get("step")
             if step in ("vlm", "search", "llm", "size", "comfyui"):
                 task_update(tid, step=step, msg=ev.get("msg") or "")
+                yield ev   # 进度事件也必须推给 SSE 流，否则前端收不到中间状态
             elif step == "done":
                 task_finish(tid, True, msg="✅ 生成完成",
                             image=ev.get("image"),
@@ -1774,7 +1775,13 @@ def api_health():
     comfy_ok = False
     comfy_err = ""
     try:
-        r = _rq.get(f"{settings.comfyui_url}/system_stats", timeout=5)
+        s = _rq.Session()
+        host = (settings.comfyui_url.split("//", 1)[-1]
+                .split("/", 1)[0].split(":")[0]
+                if "//" in settings.comfyui_url else "")
+        if host in ("127.0.0.1", "localhost", "::1", ""):
+            s.trust_env = False   # 本机不走系统代理（避免回环流量被代理挂起）
+        r = s.get(f"{settings.comfyui_url}/system_stats", timeout=5)
         comfy_ok = r.ok
         if not r.ok:
             comfy_err = f"HTTP {r.status_code}"

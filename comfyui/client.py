@@ -33,6 +33,11 @@ class ComfyUIClient:
             pool_connections=1, pool_maxsize=1, max_retries=0)
         self._session.mount("http://", adapter)
         self._session.mount("https://", adapter)
+        # 本机回环地址不走系统代理（全局代理会把 localhost 回环流量转发而挂起）
+        host = self.server_url.split("//", 1)[-1].split("/", 1)[0].split(":")[0] \
+            if "//" in self.server_url else ""
+        if host in ("127.0.0.1", "localhost", "::1", ""):
+            self._session.trust_env = False
 
     # ------------------------------------------------------------------ #
     # 工作流处理

@@ -7,6 +7,20 @@ from logger import get_logger as _get_logger
 
 logger = _get_logger("llm")
 
+# 本机代理陷阱：开发机常设置了全局 HTTP(S)_PROXY（如 http://127.0.0.1:50096），
+# requests 默认会读环境代理去访问 127.0.0.1 的本机 LLM/ComfyUI，导致本地回环
+# 流量被代理转发而挂起/超时。所有访问【本机服务】的请求必须绕过代理。
+# 注意：proxies={"http": None} 写法不可靠（不一定覆盖环境代理），
+# 必须用 session.trust_env = False 才能彻底忽略环境代理。
+def _make_session(url: str) -> requests.Session:
+    """为目标 URL 创建 session：本机回环地址禁用环境代理，其余保持默认。"""
+    s = requests.Session()
+    host = (url.split("//", 1)[1].split("/", 1)[0].split(":")[0]
+            if "//" in url else "")
+    if host in ("127.0.0.1", "localhost", "::1", ""):
+        s.trust_env = False
+    return s
+
 PROMPT_SYSTEM = (
     "You are a prompt generator. "
     "Output ONLY the prompt. No greetings, no notes, no labels, no markdown, no JSON, no quotes. "
@@ -130,6 +144,10 @@ class LLMClient:
             "messages": messages,
             "temperature": 0.1,
         }
+        # Qwen3 等推理模型默认开启"思考模式"：生成式任务（草稿/复选）不带
+        # max_tokens 时模型可能长时间思考导致请求超时/不稳定。尝试通过
+        # chat_template_kwargs 关闭 thinking（llama.cpp 支持）；若服务端
+        # 不认此参数（报错），回退到不带该参数的请求重试一次。
 
         # Sanity check: strip any remaining image refs
         body_str = json.dumps(body)
@@ -141,14 +159,35 @@ class LLMClient:
                     c = c.replace('[img]', '').replace('[IMG]', '')
                     msg["content"] = c.strip()
 
+        def _do_post(b):
+            _sess = _make_session(url)
+            return _sess.post(url, headers=headers, json=b, timeout=120)
+
         try:
-            resp = requests.post(url, headers=headers, json=body, timeout=120)
+            body["chat_template_kwargs"] = {"enable_thinking": False}
+            resp = _do_post(body)
         except requests.exceptions.ConnectionError:
             raise RuntimeError(f"无法连接到 LLM API ({self.base_url})")
         except requests.exceptions.Timeout:
             raise RuntimeError(
                 "LLM API 请求超时（120 秒）。本地大模型推理较慢时请稍后重试，"
                 "或确认模型服务未被其他任务占满")
+        # 服务端若不支持 chat_template_kwargs（如部分 OpenAI 兼容网关）
+        # 会返回 4xx；此时去掉该参数原样重试一次
+        if not resp.ok and resp.status_code in (400, 422, 500):
+            low = resp.text.lower()
+            if ("chat_template_kwargs" in low or "enable_thinking" in low
+                    or "unrecognized" in low or "unknown argument" in low
+                    or "additional properties" in low):
+                try:
+                    body.pop("chat_template_kwargs", None)
+                    resp = _do_post(body)
+                except requests.exceptions.ConnectionError:
+                    raise RuntimeError(f"无法连接到 LLM API ({self.base_url})")
+                except requests.exceptions.Timeout:
+                    raise RuntimeError(
+                        "LLM API 请求超时（120 秒）。本地大模型推理较慢时请稍后重试，"
+                        "或确认模型服务未被其他任务占满")
 
         raw = resp.text
         if resp.status_code in (401, 403):
