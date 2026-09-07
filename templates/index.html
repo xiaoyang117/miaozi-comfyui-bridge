@@ -13,6 +13,7 @@
   <div class="header">
     <h1>喵梓二号<small>ComfyUI 生图助手</small></h1>
     <span id="uiVer" style="display:none">v20260906b</span>
+    <button class="btn-shutdown" onclick="shutdownServer()" title="关闭喵梓服务进程">⏻ 关闭服务</button>
     <nav class="tabs">
       <button class="tab active" data-tab="chat" onclick="switchTab('chat')">对话</button>
       <button class="tab" data-tab="settings" onclick="switchTab('settings')">配置</button>
@@ -379,6 +380,22 @@ function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + name));
   if (name === 'gallery') { galleryInit(); }
+}
+
+// ================= 关闭服务 =================
+let _shuttingDown = false;
+async function shutdownServer() {
+  if (_shuttingDown) return;
+  if (!confirm('确定要关闭喵梓服务吗？\n关闭后页面将无法访问，需重新启动服务才能恢复。')) return;
+  _shuttingDown = true;
+  const btn = document.querySelector('.btn-shutdown');
+  if (btn) { btn.disabled = true; btn.textContent = '⏻ 关闭中…'; }
+  try {
+    await fetch('/api/shutdown', { method: 'POST' });
+    showModal('服务已关闭', '喵梓服务已停止。\n需要重新使用时，请重新启动服务（双击 start.bat）。');
+  } catch (e) {
+    showModal('已请求关闭', '服务关闭请求已发送，若页面仍可访问请稍候刷新。');
+  }
 }
 
 // ================= 图库 / 二采 =================

@@ -1676,6 +1676,24 @@ def api_upscale():
                     "scale": scale, "denoise": denoise})
 
 
+@app.route("/api/shutdown", methods=["POST"])
+def api_shutdown():
+    """全局关闭按钮：停止喵梓服务进程。
+
+    页面按钮调用；立即返回响应，后台线程延迟 0.6s 后强制退出进程，
+    保证浏览器收到响应后再关。
+    """
+    log.info("收到关闭服务请求，正在退出…")
+    import os as _os
+
+    def _bye():
+        import time as _t
+        _t.sleep(0.6)
+        _os._exit(0)
+    threading.Thread(target=_bye, daemon=True).start()
+    return jsonify({"success": True, "msg": "服务已关闭"})
+
+
 @app.route("/api/health", methods=["GET"])
 def api_health():
     """健康检查：确认服务与 ComfyUI 可达状态。"""

@@ -663,3 +663,11 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .upscale-source img { width: 100%; height: 100%; object-fit: contain; border-radius: 8px; background: var(--color-background-secondary); }
 .upscale-controls { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 8px; }
 .upscale-controls label { font-size: .8rem; display: flex; flex-direction: column; gap: 4px; }
+
+/* ================= 全局关闭服务按钮 ================= */
+.btn-shutdown { margin-left: 10px; font-size: .72rem; padding: 4px 10px;
+  border: 1px solid var(--color-border-secondary); border-radius: 6px;
+  background: var(--color-background-secondary); color: var(--red);
+  cursor: pointer; flex-shrink: 0; align-self: center; }
+.btn-shutdown:hover { border-color: var(--red); }
+.btn-shutdown:disabled { opacity: .5; cursor: default; }
