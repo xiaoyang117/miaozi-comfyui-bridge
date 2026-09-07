@@ -986,6 +986,24 @@ function updateCtxBar() {
   bar.title = `估算发送内容占上下文窗口比例\n系统提示 约${fmt(sysN)} · 历史 约${fmt(histN)} · 当前输入 约${fmt(curN)}\n\n实际窗口大小可在配置页「LLM 上下文窗口」调整`;
 }
 
+// 用 LLM API 返回的真实 prompt_tokens 校正进度条（替代估算值）
+function applyCtxUsage(realPromptTokens) {
+  const bar = document.getElementById('ctxBar');
+  if (!bar) return;
+  const total = parseInt(document.getElementById('s_llm_context_tokens').value) || 0;
+  if (!total) return;
+  const used = realPromptTokens || 0;
+  const pct = Math.min(100, Math.round(used / total * 100));
+  const fill = document.getElementById('ctxFill');
+  const txt = document.getElementById('ctxText');
+  if (!fill || !txt) return;
+  fill.style.width = pct + '%';
+  fill.className = 'ctx-fill' + (pct >= 90 ? ' ctx-danger' : (pct >= 60 ? ' ctx-warn' : ''));
+  const fmt = n => n >= 1000 ? (n/1000).toFixed(1)+'k' : String(n);
+  txt.textContent = `约 ${fmt(used)} / ${fmt(total)} tok (${pct}%) ✓实测`;
+  bar.classList.remove('hidden');
+}
+
 // ================= 发送 =================
 async function sendMessage() {
   if (isGenerating) return;
@@ -1129,6 +1147,11 @@ async function sendMessage() {
       chatHistory.push({role:'assistant',content:result.prompt});
       chatLog.push({role:'assistant',text:result.prompt,imageUrl:result.image,search:result.search,vlm:result.vlm,size:result.size});
       saveChatLog();
+      if (result.ctx_usage && result.ctx_usage.prompt_tokens) {
+        applyCtxUsage(result.ctx_usage.prompt_tokens);   // 真实值校正进度条
+      } else {
+        updateCtxBar();
+      }
       const cacheBust = result.image + '?cb=' + Date.now()+'_'+Math.random().toString(36).slice(2,6);
       addChatBubble('assistant', result.prompt, cacheBust, result.search, chatLog.length-1, result.vlm, result.size);
       const parts = [];

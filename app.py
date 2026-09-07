@@ -1010,6 +1010,15 @@ def _run_generation(data: dict):
 
         if path and path.exists():
             log.info("[%s] done, 图片已保存", gid)
+            ctx_usage = None
+            try:
+                u = getattr(llm, "last_usage", None)
+                if isinstance(u, dict):
+                    pt = u.get("prompt_tokens") or 0
+                    ctx_usage = {"prompt_tokens": pt,
+                                 "total_tokens": (u.get("total_tokens") or pt)}
+            except Exception:
+                ctx_usage = None
             yield {
                 "step": "done",
                 "image": f"/outputs/{path.name}",
@@ -1019,6 +1028,7 @@ def _run_generation(data: dict):
                          "height": int(height) if height else None,
                          "via": size_via},
                 "vlm": vlm_description,
+                "ctx_usage": ctx_usage,   # 本次生成最后一次 LLM 请求的真实 token
             }
         else:
             log.error("[%s] comfyui 未返回图片路径", gid)

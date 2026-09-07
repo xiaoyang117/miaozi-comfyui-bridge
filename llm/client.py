@@ -78,6 +78,8 @@ class LLMClient:
         self.api_key = api_key
         self.model = model
         self._prompt_system = custom_system_prompt.strip() or PROMPT_SYSTEM
+        # 最近一次请求的真实 token 用量（OpenAI 兼容 usage，可能为 None）
+        self.last_usage: dict | None = None
 
     def _call(self, system: str, user: str, history: list = None) -> str:
         url = f"{self.base_url}/chat/completions"
@@ -167,6 +169,9 @@ class LLMClient:
             text = re.sub(r'\n?```$', '', text)
             text = re.sub(r'^["\'`]|["\'`]$', '', text)
             text = text.strip()
+            # 记录真实 token 用量供前端上下文进度条校正
+            self.last_usage = (data.get("usage") or {}) if isinstance(
+                data.get("usage"), dict) else None
             return text
         except (KeyError, IndexError, TypeError):
             raise RuntimeError(
