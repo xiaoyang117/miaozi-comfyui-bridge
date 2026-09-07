@@ -64,8 +64,8 @@ DEFAULT_SETTINGS = {
     "danbooru_username": "",
 
     # ---- 对话 ----
-    # 历史上下文轮数：每轮=1条用户消息+1条助手回复；0 表示每次全新对话
-    "history_rounds": 2,
+    # 是否携带上下文历史（前端按 token 预算自适应裁剪轮数）
+    "use_history": True,
     # LLM 上下文窗口大小(token)：用于前端估算上下文使用量进度条
     "llm_context_tokens": 32768,
 
@@ -231,8 +231,9 @@ class Settings:
         return list(DEFAULT_SETTINGS["search_sources"])
 
     @property
-    def history_rounds(self) -> int:
-        return _to_int(self._data.get("history_rounds", 2), 2)
+    def use_history(self) -> bool:
+        """前端是否携带上下文历史（预算自适应）。"""
+        return bool(self._data.get("use_history", True))
 
     @property
     def llm_context_tokens(self) -> int:

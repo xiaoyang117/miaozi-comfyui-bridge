@@ -207,17 +207,19 @@
       <h3>对话</h3>
       <div class="settings-row">
         <div>
-          <label>历史上下文轮数（上限）</label>
-          <input id="s_history_rounds" type="number" min="0" max="20" title="历史最多回溯多少轮；实际轮数会按 token 预算自动适配（窗口减去系统提示/当前输入/输出预留后能塞多少带多少）。0=每次全新对话">
-        </div>
-        <div>
           <label>LLM 上下文窗口 (token)</label>
           <input id="s_llm_context_tokens" type="number" min="1024" max="1000000" step="1024">
         </div>
       </div>
-      <p class="field-hint">历史轮数=每轮(用户消息+助手回复)上限，0=每次全新对话。
-        上下文窗口填你模型的 max context（如 qwen2.5:7b 默认 32768），
-        用于输入框上方进度条估算上下文使用量。</p>
+      <div class="toggle-row">
+        <label class="toggle-label">
+          <input type="checkbox" id="s_use_history" checked>
+          <span>携带上下文历史</span>
+        </label>
+      </div>
+      <p class="field-hint">上下文窗口填你模型的 max context（如 qwen2.5:7b 默认 32768）。
+        历史会自动按 token 预算裁剪（窗口 − 系统提示 − 当前输入 − 输出预留），无需手动设轮数。
+        关闭"携带上下文历史"则每次生成只按当前输入，不受之前对话影响。</p>
       <div class="toggle-row">
         <label class="toggle-label" title="启用后 LLM 先生成提示词草稿，再由 danbooru 标签词库校验，保证提示词只含真实标签">
           <input type="checkbox" id="s_tag_selection" checked>
@@ -953,10 +955,11 @@ function ctxSystemPrompt() {
 }
 // 按 token 预算自适应挑选历史轮数，并拼成"用户:…/助手:…"文本。
 // 预算 = 窗口 − 系统提示 − 当前输入 − 输出预留(15%)；
-// 轮数上限 = historyRounds（0 = 不带历史）。sendMessage 与进度条共用本函数。
+// 开关 s_use_history 关闭时完全不带历史。sendMessage 与进度条共用本函数。
 function buildHistoryText(curText) {
-  const roundsCap = parseInt(document.getElementById('s_history_rounds').value) || 0;
-  if (roundsCap <= 0 || chatHistory.length < 2) return '';
+  const useHist = document.getElementById('s_use_history');
+  if (useHist && !useHist.checked) return '';
+  if (chatHistory.length < 2) return '';
   const total = parseInt(document.getElementById('s_llm_context_tokens').value) || 0;
   // 消息序列：每轮恰好是 [user, assistant] 相邻两条（生成成功才 push assistant）
   // 从最新往回取"完整的轮"，旧到新拼回
@@ -972,7 +975,7 @@ function buildHistoryText(curText) {
         - Math.round(total * 0.15))
     : Infinity;
   let spent = 0;
-  while (idx >= 1 && chosen.length < roundsCap * 2) {
+  while (idx >= 1) {
     const a = msgs[idx], b = msgs[idx - 1];   // b=user, a=assistant
     if (!a || !b || a.role !== 'assistant' || b.role !== 'user') break;
     const pair = [
@@ -1000,9 +1003,8 @@ function updateCtxBar() {
   const bar = document.getElementById('ctxBar');
   if (!bar) return;
   const total = parseInt(document.getElementById('s_llm_context_tokens').value) || 0;
-  const histRounds = parseInt(document.getElementById('s_history_rounds').value) || 0;
-  // 未配置窗口 或 历史轮数为 0（每轮全新对话，无可视上下文预算）→ 隐藏
-  if (!total || histRounds <= 0) { bar.classList.add('hidden'); return; }
+  // 未配置窗口时隐藏
+  if (!total) { bar.classList.add('hidden'); return; }
   bar.classList.remove('hidden');   // 修复: 显示分支必须移除 hidden（之前遗漏）
   const used = ctxEstimateNow();
   const pct = Math.min(100, Math.round(used / total * 100));
@@ -1319,10 +1321,9 @@ async function loadSettings(silent) {
       $('s_workflow_path').value = (s.workflow_path && s.workflow_path.includes('/')) ? (s.workflow_path.split('/').pop()) : (s.workflow_path||'MIAOMIAO 1.json');
       $('s_gen_width').value = s.gen_width??896;
       $('s_gen_height').value = s.gen_height??1152;
-      $('s_history_rounds').value = s.history_rounds??2;
       $('s_llm_context_tokens').value = s.llm_context_tokens??32768;
+      $('s_use_history').checked = s.use_history !== false;
       $('s_tag_selection').checked = s.tag_selection !== false;
-      $('s_tag_reselect').checked = s.tag_reselect !== false;
       resPresets = parseResPresets(s.resolution_presets);
       renderResPresetEditor(); populateResDropdown();
       updateCtxBar();  // 上下文窗口值已就绪，刷新进度条
@@ -1351,7 +1352,7 @@ async function saveSettings() {
     gen_width: parseInt($('s_gen_width').value)||896,
     gen_height: parseInt($('s_gen_height').value)||1152,
     resolution_presets: resPresets,
-    history_rounds: parseInt($('s_history_rounds').value)||0,
+    use_history: $('s_use_history').checked,
     llm_context_tokens: parseInt($('s_llm_context_tokens').value)||32768,
     tag_selection: $('s_tag_selection').checked,
     tag_reselect: $('s_tag_reselect').checked,
