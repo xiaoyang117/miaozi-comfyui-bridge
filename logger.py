@@ -27,8 +27,20 @@ LOG_LEVEL = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(),
 _local = threading.local()
 
 # 控制台与文件共用的格式
-_FILE_FMT = "%(asctime)s | %(levelname)-7s | %(name)s | %(threadName)s | %(message)s"
+# 注意：request_id 必须出现在格式串里，否则 _RequestFilter 附加的字段永远不会被输出，
+# 一次生成的完整链路就无法在日志里串起来。
+_FILE_FMT = ("%(asctime)s | %(levelname)-7s | %(name)s | %(threadName)s | "
+             "%(message)s")
 _CONSOLE_FMT = "%(asctime)s %(levelname)-7s %(name)s | %(message)s"
+
+
+class _RequestFormatter(logging.Formatter):
+    """在消息前附加 request_id 前缀（有则显示，无则原样）。"""
+
+    def format(self, record):
+        base = super().format(record)
+        rid = getattr(record, "request_id", "")
+        return f"[{rid}] {base}" if rid else base
 
 _config_lock = threading.Lock()
 _configured = False
@@ -73,7 +85,7 @@ def setup_logging():
                 LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=5,
                 encoding="utf-8")
             fh.setLevel(LOG_LEVEL)
-            fh.setFormatter(logging.Formatter(_FILE_FMT))
+            fh.setFormatter(_RequestFormatter(_FILE_FMT))
             fh.addFilter(_RequestFilter())
             root.addHandler(fh)
         except Exception as e:
@@ -82,7 +94,7 @@ def setup_logging():
         # ---- 控制台 ----
         ch = logging.StreamHandler(sys.stdout)
         ch.setLevel(LOG_LEVEL)
-        ch.setFormatter(logging.Formatter(_CONSOLE_FMT, datefmt="%H:%M:%S"))
+        ch.setFormatter(_RequestFormatter(_CONSOLE_FMT, datefmt="%H:%M:%S"))
         ch.addFilter(_RequestFilter())
         root.addHandler(ch)
 

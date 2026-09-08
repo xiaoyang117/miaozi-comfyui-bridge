@@ -511,19 +511,47 @@ def resolve_multi(text: str, max_roles: int = 3) -> list[list[dict]]:
             res = _lookup_role(role)
             if res:
                 _push(_disambiguate(res, text))
+
+    # 4) 兜底：整段当一个角色解析。
+    #    上面的分支分别处理「多段标签」「中文名映射」「别名表」，
+    #    但单个纯英文角色名（如 "shiroko"）三段都不覆盖 → 会整段漏掉。
+    #    必须过置信度校验，否则 "zzzz_nonexist" 会被模糊匹配成无关角色。
+    if not out:
+        cands = resolve_from_text(text)
+        if cands and (_confidence_ok(text, cands[0])
+                      or not re.search(r"[a-z]", text, re.I)):
+            _push(cands)
     return out[:max_roles]
 
 
 def _confidence_ok(input_text: str, best: dict) -> bool:
-    """判断宽松命中的置信度：输入里的有效词须出现在角色字段中。"""
+    """判断宽松命中的置信度：输入里的有效词须与【角色名主体】按 token 对齐。
+
+    两个关键点（都曾导致误判）：
+    1. 必须排除「作品名/版权」部分，否则输入 "blue_archive" 会匹配成
+       sensei_(blue_archive) 之类的假角色。
+       角色主体 = character 中括号前的部分（shiroko_(blue_archive) -> shiroko）。
+    2. 必须按 token 匹配而非子串，否则输入 "solo" 会命中 phamr*solo*ne
+       这类碰巧包含该词的角色。
+    """
     words = [w for w in re.split(r"[^a-z0-9]+", input_text.lower()) if len(w) >= 3]
     if not words:
         return False
     char = best.get("character", "").lower()
+    # 剥离版权括号：shiroko_(blue_archive) -> "shiroko"
+    m = re.match(r"^([^(]+?)_?\(", char)
+    subject = (m.group(1) if m else char)
     name = best.get("name", "").lower()
-    trigger = best.get("trigger", "").lower()
-    blob = char + " " + name + " " + trigger
-    return any(w in blob for w in words)
+    # name 字段形如 "Shiroko (blue archive)"，同样剥离括号内容
+    name = re.sub(r"\([^)]*\)", " ", name)
+    tokens = [t for t in re.split(r"[^a-z0-9]+", subject + " " + name) if t]
+    if not tokens:
+        return False
+    # 精确 token 相等，或长词前缀匹配（shiroko 命中 shiroko_terror）
+    return any(
+        w == t or (len(w) >= 4 and t.startswith(w))
+        for w in words for t in tokens
+    )
 
 
 def role_candidates_text(text: str) -> str:

@@ -5,6 +5,8 @@
   也支持用 width_placeholder / height_placeholder 做字符串占位替换。
 """
 import json
+import re
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -78,6 +80,27 @@ class ComfyUIClient:
             wf = json.loads(wf_str)
         return wf
 
+    @staticmethod
+    def _ph_sub(text: str, ph: str, value) -> str:
+        """按「独立 token」替换占位符，避免子串误伤。
+
+        例：占位符 chang 不应命中提示词里的 changing。
+        """
+        if not ph:
+            return text
+        return re.sub(
+            r"(?<![A-Za-z0-9_])" + re.escape(ph) + r"(?![A-Za-z0-9_])",
+            str(value), text)
+
+    @staticmethod
+    def _ph_hit(text: str, ph: str) -> bool:
+        """占位符是否作为独立 token 出现在文本里。"""
+        if not ph:
+            return False
+        return re.search(
+            r"(?<![A-Za-z0-9_])" + re.escape(ph) + r"(?![A-Za-z0-9_])",
+            text) is not None
+
     def apply_size(self, workflow: dict, width: Optional[int],
                    height: Optional[int],
                    width_ph: str = "", height_ph: str = "") -> dict:
@@ -91,19 +114,19 @@ class ComfyUIClient:
         """
         wf = json.loads(json.dumps(workflow, ensure_ascii=False))
 
-        # 方式 1：字符串占位（如果 LLM 生成的文本里带 chang/gao 之类词）仅在占位符有意义时处理
+        # 方式 1：字符串占位替换。
+        # 注意：调用方通常先做了 apply_prompt，此时 LLM 提示词已进入工作流 JSON，
+        # 因此必须用「独立 token」匹配，否则 chang 会命中 changing、gao 命中 gaokao，
+        # 把提示词改烂（且会误判为"工作流用了占位符"从而跳过方式 2）。
         if width_ph or height_ph:
-            ph_used = False
-            if width_ph and str(width_ph) in json.dumps(wf):
-                ph_used = True
-            elif height_ph and str(height_ph) in json.dumps(wf):
-                ph_used = True
+            wf_str = json.dumps(wf, ensure_ascii=False)
+            ph_used = self._ph_hit(wf_str, width_ph) or \
+                self._ph_hit(wf_str, height_ph)
             if ph_used and (width or height):
-                wf_str = json.dumps(wf, ensure_ascii=False)
-                if width_ph:
-                    wf_str = wf_str.replace(width_ph, str(int(width)))
-                if height_ph:
-                    wf_str = wf_str.replace(height_ph, str(int(height)))
+                if width and width_ph:
+                    wf_str = self._ph_sub(wf_str, width_ph, int(width))
+                if height and height_ph:
+                    wf_str = self._ph_sub(wf_str, height_ph, int(height))
                 return json.loads(wf_str)
 
         # 方式 2：改写 EmptyLatentImage 系列节点
@@ -160,10 +183,20 @@ class ComfyUIClient:
           - LoadImage.image  = "INPUT_IMAGE_PH"
           - ImageScaleBy.scale_by = 数值 2.0
           - KSampler.denoise = 数值 0.5
-          - KSampler.seed    = 数值（0 = 随机）
+          - KSampler.seed    = 数值（未传则随机，保证重复二采结果不同）
+
+        提示词注入：
+          - 若模板里存在 placeholder（默认 UPSCALE_PROMPT_PH）则替换之；
+          - 否则若传入了 prompt，则追加到 KSampler.positive 指向的正向
+            CLIPTextEncode 文本末尾（避免 prompt 被静默丢弃）。
         """
         import copy
+        import random as _rnd
+        # seed 未指定时随机：ComfyUI 的 seed=0 并不是"随机"，固定 0 会导致
+        # 同一张图用同样参数反复二采得到完全相同的结果。
+        real_seed = int(seed) if seed is not None else _rnd.randint(1, 2**63 - 1)
         wf = copy.deepcopy(workflow)
+        ph_hit = False
         for nid, node in wf.items():
             inputs = node.get("inputs")
             if not isinstance(inputs, dict):
@@ -172,6 +205,7 @@ class ComfyUIClient:
             for k, v in inputs.items():
                 if isinstance(v, str) and placeholder in v:
                     inputs[k] = v.replace(placeholder, prompt or "")
+                    ph_hit = True
                 elif k == "image" and v == "INPUT_IMAGE_PH":
                     inputs[k] = input_filename
                 elif ct == "ImageScaleBy" and k == "scale_by":
@@ -181,12 +215,46 @@ class ComfyUIClient:
                 elif ct == "KSampler" and k == "denoise":
                     inputs[k] = float(denoise)
                 elif ct == "KSampler" and k == "seed":
-                    inputs[k] = int(seed if seed is not None
-                                    else 0) or 0
+                    inputs[k] = real_seed
+        if prompt and not ph_hit:
+            self._append_positive_prompt(wf, prompt)
         prompt_id = self.submit(wf)
         node_ids = self._detect_image_node_ids(wf)
         return self._wait_and_download(prompt_id, node_ids,
                                        progress_cb=progress_cb)
+
+    @staticmethod
+    def _append_positive_prompt(wf: dict, prompt: str) -> bool:
+        """把 prompt 追加到 KSampler.positive 指向的正向文本节点末尾。
+
+        模板没有占位符时使用，保证额外提示词不会被静默丢弃。
+        返回是否成功注入。
+        """
+        if not prompt:
+            return False
+        for node in wf.values():
+            if not isinstance(node, dict):
+                continue
+            if not str(node.get("class_type") or "").startswith("KSampler"):
+                continue
+            inputs = node.get("inputs")
+            if not isinstance(inputs, dict):
+                continue
+            pos = inputs.get("positive")
+            # positive 形如 ["11", 0]
+            if not (isinstance(pos, list) and pos):
+                continue
+            tgt = wf.get(str(pos[0]))
+            if not isinstance(tgt, dict):
+                continue
+            tin = tgt.get("inputs")
+            if not (isinstance(tin, dict) and isinstance(tin.get("text"), str)):
+                continue
+            old = tin["text"].rstrip()
+            tin["text"] = (old + ", " + prompt) if old else prompt
+            log.info("二采模板无占位符，已把额外提示词追加到节点 %s", pos[0])
+            return True
+        return False
 
     def submit(self, workflow: dict) -> str:
         resp = self._session.post(
@@ -224,7 +292,8 @@ class ComfyUIClient:
                  height: Optional[int] = None,
                  width_placeholder: str = "",
                  height_placeholder: str = "",
-                 progress_cb=None) -> Optional[Path]:
+                 progress_cb=None,
+                 cancel: Optional[threading.Event] = None) -> Optional[Path]:
         """替换占位符 + 设置尺寸 + 提交 + 轮询 + 下载图片。
 
         save_node_id 已无需手动配置：自动探测工作流里所有会输出图片的节点
@@ -232,6 +301,7 @@ class ComfyUIClient:
         逐个尝试、谁有图用谁。save_node_id 仅作为附加的优先候选保留兼容。
 
         progress_cb: 可选回调 progress_cb(str)，等待期间周期回报进度文案。
+        cancel: 可选 threading.Event，置位后中止等待轮询。
         """
         self.output_dir.mkdir(parents=True, exist_ok=True)
         wf = self.apply_prompt(workflow, prompt, placeholder)
@@ -244,7 +314,8 @@ class ComfyUIClient:
         node_ids = self._detect_image_node_ids(wf, save_node_id)
         log.info("输出节点候选: %s (配置: %r)", node_ids, save_node_id)
         return self._wait_and_download(prompt_id, node_ids,
-                                       progress_cb=progress_cb)
+                                       progress_cb=progress_cb,
+                                       cancel=cancel)
 
     @staticmethod
     def randomize_seed(workflow: dict, seed: Optional[int] = None) -> dict:
@@ -298,16 +369,23 @@ class ComfyUIClient:
     def _wait_and_download(self, prompt_id: str,
                            node_ids: list,
                            progress_cb=None,
-                           timeout: float = 600) -> Optional[Path]:
+                           timeout: float = 600,
+                           cancel: Optional[threading.Event] = None) -> Optional[Path]:
         """等待 ComfyUI 执行完成并下载图片。
 
         timeout 默认 600 秒：img2img 放大 + 重采样在图较大时偏慢，
         300 秒容易误杀；普通文生图通常 1~2 分钟内完成。
+
+        cancel: 可选 threading.Event，置位后立即中止等待（用于客户端断开时
+        及时释放，避免后台线程继续空转轮询）。
         """
         start = time.time()
         if progress_cb:
             progress_cb(f"已提交 ComfyUI，排队等待执行…")
         while time.time() - start < timeout:
+            if cancel is not None and cancel.is_set():
+                log.info("等待被取消，停止轮询 prompt_id=%s", prompt_id)
+                return None
             time.sleep(1)
             # 周期回报：执行中已等待秒数
             if progress_cb and int(time.time() - start) % 2 == 0:

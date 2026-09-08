@@ -274,18 +274,10 @@
       <p class="field-hint">上下文窗口填你模型的 max context（如 qwen2.5:7b 默认 32768）。
         历史会自动按 token 预算裁剪（窗口 − 系统提示 − 当前输入 − 输出预留），无需手动设轮数。
         关闭"携带上下文历史"则每次生成只按当前输入，不受之前对话影响。</p>
-      <div class="toggle-row">
-        <label class="toggle-label" title="启用后 LLM 先生成提示词草稿，再由 danbooru 标签词库校验，保证提示词只含真实标签">
-          <input type="checkbox" id="s_tag_selection" checked>
-          <span class="toggle-slider"></span>标签库校验（提示词只含真实标签）
-        </label>
-      </div>
-      <div class="toggle-row">
-        <label class="toggle-label" title="开：草稿不达标准时召回候选池让 LLM 复选补正(多一次调用)；关：直接剔除不在词库的词(少一次调用但可能丢语义)">
-          <input type="checkbox" id="s_tag_reselect" checked>
-          <span class="toggle-slider"></span>复选补正（开=草稿生成后再从词库重选）
-        </label>
-      </div>
+      <p class="field-hint" style="color:var(--text-faint)">
+        ℹ️ 早期版本的「标签库校验 / 复选补正」已随混合模式提示词下线，
+        当前提示词由 LLM 直接生成（自然语言 + 关键标签），不再走 danbooru 词库复选。
+      </p>
     </div>
 
     <div id="settingsError" class="error hidden">
@@ -1770,7 +1762,6 @@ async function loadSettings(silent) {
       $('s_gen_height').value = s.gen_height??1152;
       $('s_llm_context_tokens').value = s.llm_context_tokens??32768;
       $('s_use_history').checked = s.use_history !== false;
-      $('s_tag_selection').checked = s.tag_selection !== false;
       resPresets = parseResPresets(s.resolution_presets);
       renderResPresetEditor(); populateResDropdown();
       updateCtxBar();  // 上下文窗口值已就绪，刷新进度条
@@ -1802,8 +1793,6 @@ async function saveSettings() {
     resolution_presets: resPresets,
     use_history: $('s_use_history').checked,
     llm_context_tokens: parseInt($('s_llm_context_tokens').value)||32768,
-    tag_selection: $('s_tag_selection').checked,
-    tag_reselect: $('s_tag_reselect').checked,
   };
   try {
     const r = await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});

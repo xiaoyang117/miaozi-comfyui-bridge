@@ -10,7 +10,6 @@
 """
 import itertools
 import json
-import os
 import re
 import threading
 import time
@@ -22,11 +21,8 @@ from flask import (Flask, Response, jsonify, render_template, request,
 
 from character_lookup.query import is_built, lookup as char_lookup
 from character_lookup import resolver as char_resolver
-from character_lookup import tag_vocab as char_tags
 from comfyui.client import ComfyUIClient
-from llm.client import (LLMClient, PROMPT_SYSTEM_SPECIFIC,
-                        PROMPT_WITH_CONTEXT_SPECIFIC,
-                        PROMPT_MULTI_ROLE_SPECIFIC,
+from llm.client import (LLMClient,
                         PROMPT_MIXED_SPECIFIC,
                         PROMPT_MIXED_NOROLE,
                         SEARCH_SYSTEM_TINY, EXTRACT_CN_SYSTEM,
@@ -171,6 +167,20 @@ def make_comfy(shared: bool = True) -> ComfyUIClient:
 # ====================================================================== #
 # VLM 图片识别
 # ====================================================================== #
+def _http_session(url: str) -> _req.Session:
+    """按目标 URL 建 session：本机回环地址禁用环境代理。
+
+    与 llm/client.py 的 _make_session 同一策略：开发机常设全局 HTTP(S)_PROXY，
+    requests 默认会把 127.0.0.1 的回环流量丢给代理导致挂起/超时。
+    """
+    s = _req.Session()
+    host = (url.split("//", 1)[1].split("/", 1)[0].split(":")[0]
+            if "//" in url else "")
+    if host in ("127.0.0.1", "localhost", "::1", ""):
+        s.trust_env = False
+    return s
+
+
 def vlm_analyze(image_list: list) -> str:
     """调用 VLM 逐张描述图片中的角色外貌。"""
     if not image_list:
@@ -201,7 +211,7 @@ def vlm_analyze(image_list: list) -> str:
         "temperature": 0.1,
     }
     try:
-        resp = _req.post(url, headers=headers, json=body, timeout=60)
+        resp = _http_session(url).post(url, headers=headers, json=body, timeout=60)
     except _req.exceptions.ConnectionError:
         raise RuntimeError(f"无法连接到 VLM ({base_url})")
     except _req.exceptions.Timeout:
@@ -295,212 +305,6 @@ def _fmt_best_candidate(d: dict) -> str:
     if tags:
         lines.append(f"特征标签: {', '.join(tags[:80])}")
     return "\n".join(lines)
-
-
-# 互斥特征组：同一组内不同值冲突（如不同发色/瞳色/体型），强制补回时只取第一个
-_CONFLICT_GROUPS = [
-    {"black_hair", "white_hair", "blonde_hair", "brown_hair", "red_hair",
-     "blue_hair", "green_hair", "purple_hair", "pink_hair", "grey_hair",
-     "silver_hair", "orange_hair", "multicolored_hair", "two-tone_hair"},
-    {"red_eyes", "blue_eyes", "green_eyes", "yellow_eyes", "purple_eyes",
-     "brown_eyes", "black_eyes", "pink_eyes", "grey_eyes", "heterochromia"},
-    {"small_breasts", "medium_breasts", "large_breasts", "huge_breasts"},
-    {"short_hair", "long_hair", "very_long_hair", "medium_hair"},
-]
-
-
-def _core_tags_conflict(tag: str, chosen: list[str]) -> bool:
-    """tag 与已选标签是否同组冲突（强制补回时避免把两个发色/瞳色都塞进去）。"""
-    for grp in _CONFLICT_GROUPS:
-        if tag in grp:
-            return any(c in grp for c in chosen)
-    return False
-
-
-def _slugify_tag(t: str) -> str:
-    """规范化标签为词库 slug（小写下划线）。"""
-    return t.strip().lower().replace(" ", "_").strip("_")
-
-
-def _arrange_multirole(tag_list: list[str],
-                       roles_meta: list[dict],
-                       pos_hint: str = "") -> str:
-    """多角色时按角色分块重排提示词，让特征贴着自己的角色名，
-    减少 SD/Qwen 系模型跨角色串特征。
-
-    结构： 角色1名+版权, 角色1专属特征,
-           角色2名+版权, 角色2专属特征,
-           公共特征(≥2角色共有),
-           其余画面标签,
-           位置锚定(左/右)。
-    单角色时不重排，返回原顺序逗号串。
-    """
-    if not tag_list:
-        return ""
-    # 人数标签归一：根据实际角色数，只保留一个匹配的人数标签，
-    # 移除冲突的(角色库core_tags常以 1girl 开头，公共复选又会加 2girls，
-    # 二者并存会误导画面的实际人数)。
-    _n_roles = len(roles_meta)
-    _GIRL_COUNT_TAGS = {"1girl", "1boy", "2girls", "2boys", "solo",
-                        "multiple_girls", "multiple_boys"}
-    _multi_tags = {"2girls", "2boys", "multiple_girls", "multiple_boys"}
-    _single_tags = {"1girl", "1boy", "solo"}
-    _girl_pres, _kept_others = [], []
-    for _tg in tag_list:
-        if _slugify_tag(_tg) in _GIRL_COUNT_TAGS:
-            _girl_pres.append(_tg)
-        else:
-            _kept_others.append(_tg)
-    if _n_roles >= 2:
-        # 多角色：剔除单人标签，从多人标签里只保留一个(优先具体人数2girls，
-        # 避免 2girls 与 multiple_girls 并存误导人数)
-        _girl_pres = [t for t in _girl_pres
-                      if _slugify_tag(t) not in _single_tags]
-        _multi_kept = [t for t in _girl_pres
-                       if _slugify_tag(t) in _multi_tags]
-        if _multi_kept:
-            # 已有多个多人标签时，保留更精确的一个(2girls>multiple_girls)
-            _multi_kept.sort(key=lambda t: (
-                0 if "multiple" not in t else 1,
-                0 if "2girls" in t or "2boys" in t else 1))
-            _girl_pres = [_multi_kept[0]]
-        else:
-            _girl_pres = ["multiple_girls"]
-    else:
-        # 单角色：剔除多人标签，保证至少保留一个单人标签
-        _girl_pres = [t for t in _girl_pres
-                      if _slugify_tag(t) not in _multi_tags]
-        if not any(_slugify_tag(t) in _single_tags for t in _girl_pres):
-            _girl_pres.append("1girl")
-    tag_list = _girl_pres + _kept_others
-    if len(roles_meta) < 2:
-        return ", ".join(tag_list)
-
-    # 每个角色的特征集（规范化 slug）
-    role_sets = []
-    _feat_tokens: set[str] = set()   # 所有角色特征 tag 的 token 集合(按 _ 拆)
-    for rm in roles_meta:
-        s = set()
-        for t in re.split(r"[,\n]", rm.get("core_tags", "")):
-            t2 = _slugify_tag(t)
-            if t2:
-                s.add(t2)
-                _feat_tokens.update(t2.split("_"))
-        role_sets.append(s)
-
-    # 归类 tag_list 中每个元素
-    uniq_head = []   # 唯一特征(仅1角色有)
-    shared = []      # 公共特征(多角色共有)
-    rest = []        # 不属于任何角色的(画面/姿态等)
-    for tg in tag_list:
-        s2 = _slugify_tag(tg)
-        owners = [i for i, s in enumerate(role_sets) if s2 in s]
-        if len(owners) >= 2:
-            shared.append(tg)
-        elif len(owners) == 1:
-            uniq_head.append((owners[0], tg))
-        else:
-            rest.append(tg)
-    # 剔除 rest 里与角色特征重复的碎片词(如 fox/animal/fluff/ornament/breasts/
-    # hairband/thighhighs/animal_ears)，避免与角色块内的 fox_ears/small_breasts
-    # 等冗余、稀释权重。判定：候选标签的所有 token 均落在角色特征 token 集合内
-    # 且候选本身不是完整角色特征(已在角色块)时视为碎片词剔除。
-    if _feat_tokens:
-        def _is_feat_fragment(tg: str) -> bool:
-            toks = _slugify_tag(tg).split("_")
-            if not toks:
-                return False
-            return all(tk in _feat_tokens for tk in toks)
-        rest = [tg for tg in rest
-                if not _is_feat_fragment(tg)]
-
-    # 组装：按角色顺序收集"该角色的特征"
-    blocks = []
-    for i, rm in enumerate(roles_meta):
-        parts = [rm.get("query", "")]
-        cp = rm.get("copyright", "")
-        if cp and cp.lower() not in (rm.get("query", "").lower()):
-            parts.append(cp)
-        # 该角色的专属特征（保持词库/输出顺序）
-        own = [tg for (oi, tg) in uniq_head if oi == i]
-        # 若该角色没有任何专属特征残留（全被当公共），至少保证角色名在
-        blocks.append(", ".join(parts + own))
-
-    # 公共特征、画面标签
-    tail = shared + rest
-    if tail:
-        blocks.append(", ".join(tail))
-    text = ", ".join(blocks)
-
-    # 位置/互动描述：优先 LLM 在草稿写的构图说明；没有再程序兜底左右
-    if len(roles_meta) == 2:
-        if pos_hint:
-            text = f"{text}, {pos_hint}"
-        else:
-            r1 = roles_meta[0].get("query", "").split("(")[0].strip("_")
-            r2 = roles_meta[1].get("query", "").split("(")[0].strip("_")
-            if r1 and r2 and r1 != r2:
-                text = f"{text}, {r1} on the left, {r2} on the right"
-    elif pos_hint:
-        text = f"{text}, {pos_hint}"
-    return text
-
-
-_COMP_BLOCK = re.compile(
-    r"\[composition\](.*?)\[/composition\]", re.IGNORECASE | re.S)
-
-
-def _extract_position_hint(draft: str,
-                           roles_meta: list[dict]) -> str:
-    """从草稿提取 LLM 写的 [composition] 构图说明（自然语言，不校验）。
-
-    返回规范化的位置/互动短句（如 "nagato on the left, akagi on the right"），
-    空串表示 LLM 没写（调用方决定兜底）。
-    """
-    if not draft:
-        return ""
-    m = _COMP_BLOCK.search(draft)
-    if not m:
-        return ""
-    body = m.group(1).strip().strip(",。 ")
-    if not body:
-        return ""
-    # 去掉可能混入的其它标签性杂质：只要含位置/互动词才保留
-    low = body.lower()
-    pos_words = ("left", "right", "behind", "front", "next to", "beside",
-                 "holding", "looking at", "embracing", "leaning",
-                 "standing", "sitting", "behind")
-    if any(w in low for w in pos_words):
-        return body[:160]
-    return ""
-
-
-# 画面标签选取数量随草稿丰富度变化：草稿越长（需求越复杂），画面区需补的越多。
-# 以草稿的"标签段数"为指标：按逗号/换行切段，纯英文自然语言按单词粗算。
-def _scene_pick_range(draft: str | None) -> tuple[int, int]:
-    """根据草稿长度估算画面区应选标签数区间 (lo, hi)。
-
-    映射（标签段数 n）：
-      n<=2   -> 2~5   极简需求(只有角色名), 少量画面点缀
-      n<=8   -> 4~8   简单需求
-      n<=16  -> 7~12  中等
-      其它    -> 10~16 复杂需求
-    """
-    if not draft or not draft.strip():
-        return 8, 15
-    segs = [s.strip() for s in re.split(r"[,\n]", draft) if s.strip()]
-    # 若切出来的段数很少但草稿很长（自然语言长句），按单词数粗估
-    n = len(segs)
-    total_chars = len(draft)
-    if n <= 3 and total_chars > 60:
-        n = min(20, max(n, total_chars // 12))
-    if n <= 2:
-        return 2, 5
-    if n <= 8:
-        return 4, 8
-    if n <= 16:
-        return 7, 12
-    return 10, 16
 
 
 # --------------------------------------------------------------------- #
@@ -1240,6 +1044,7 @@ def _run_generation(data: dict):
         import time as _time
         _cq = _queue.Queue()
         _t0 = _time.time()
+        _cancel = _th.Event()
 
         def _run_comfy():
             try:
@@ -1252,6 +1057,7 @@ def _run_generation(data: dict):
                     width_placeholder=settings.width_placeholder,
                     height_placeholder=settings.height_placeholder,
                     progress_cb=lambda msg: _cq.put(("progress", msg)),
+                    cancel=_cancel,
                 )
                 _cq.put(("ok", p))
             except Exception as e:
@@ -1261,24 +1067,30 @@ def _run_generation(data: dict):
         _th.Thread(target=_run_comfy, daemon=True).start()
         path = None
         comfy_err = None
-        while True:
-            try:
-                kind, payload = _cq.get(timeout=5)
-            except _queue.Empty:
-                # 心跳：ComfyUI 仍未返回，周期汇报防止连接空闲
-                yield {"step": "comfyui",
-                       "msg": f"⏳ 等待 ComfyUI… {int(_time.time()-_t0)}s"}
-                continue
-            if kind == "progress":
-                yield {"step": "comfyui", "msg": f"🎨 {payload}"}
-            elif kind == "ok":
-                path = payload
-                log.info("[%s] comfyui done -> %s",
-                         gid, path.name if path else None)
-                break
-            else:  # err
-                comfy_err = payload
-                break
+        try:
+            while True:
+                try:
+                    kind, payload = _cq.get(timeout=5)
+                except _queue.Empty:
+                    # 心跳：ComfyUI 仍未返回，周期汇报防止连接空闲
+                    yield {"step": "comfyui",
+                           "msg": f"⏳ 等待 ComfyUI… {int(_time.time()-_t0)}s"}
+                    continue
+                if kind == "progress":
+                    yield {"step": "comfyui", "msg": f"🎨 {payload}"}
+                elif kind == "ok":
+                    path = payload
+                    log.info("[%s] comfyui done -> %s",
+                             gid, path.name if path else None)
+                    break
+                else:  # err
+                    comfy_err = payload
+                    break
+        except GeneratorExit:
+            # 客户端断开 / 生成器被关闭：通知轮询线程退出，避免后台空转
+            _cancel.set()
+            log.info("[%s] 生成器关闭，已通知 ComfyUI 等待线程取消", gid)
+            raise
 
         if comfy_err:
             yield {"step": "error",
@@ -1315,42 +1127,6 @@ def _run_generation(data: dict):
         yield {"step": "error", "error": str(e)}
     finally:
         set_request_id("")
-
-
-# 标签复选系统提示词：要求 LLM 参考草稿、从【角色特征区】尽量多选、
-# 从【画面区】挑选画面标签，不得新增区外词。
-TAG_SELECT_SYSTEM = (
-    "你是一个 danbooru 标签选择器。用户给出画面需求、参考草稿和多个候选区。\n"
-    "请从中挑选标签组成最终提示词。\n"
-    "要求：\n"
-    "1. 只输出选中标签的英文名，逗号+空格分隔，不要序号不要解释\n"
-    "2. 有多个【角色N特征区】时：先输出 角色名标签, 再紧跟该角色的"
-    "特征标签，然后下一个角色，依此类推——每个角色的特征必须紧跟自己的角色名，"
-    "绝不能混在别的角色后面（这决定画面角色特征是否正确不串）\n"
-    "3. 每个特征区内尽量多选，冲突项(如不同发色)只选最贴合的一个\n"
-    "4. 【画面区】按提示选取数量，覆盖姿态/场景/服饰/氛围，"
-    "多角色时补充 2girls/multiple_girls 等人数标签\n"
-    "5. 全部标签必须来自候选区，禁止输出区外任何词\n"
-    "6. 若草稿来自历史对话延续（历史是泳装、本次加海边），"
-    "沿用仍适用的标签并补入新场景标签"
-)
-
-# 单角色复选系统提示词（方案B：多角色/单角色都逐角色独立复选）。
-# 每次调用只负责【一个角色】：
-#   输出 = 角色名标签, 该角色特征标签, 该角色专属场景标签。
-# 不混入其他角色、不输出画面全局标签(2girls等由最后公共复选负责)。
-TAG_SELECT_SYSTEM_SINGLE = (
-    "你是一个 danbooru 标签选择器。下面是画面需求、参考草稿和一个角色的特征区。\n"
-    "请从中挑选标签，只描述【这一个角色】。\n"
-    "要求：\n"
-    "1. 只输出选中标签的英文名，逗号+空格分隔，不要序号不要解释\n"
-    "2. 先输出 该角色名标签, 再紧跟该角色的特征标签（尽量全部选中与角色相符的；"
-    "区内若冲突(如不同发色)只选最贴合的一个）\n"
-    "3. 可以补充该角色专属的场景/服饰/动作标签(须来自草稿或特征区)\n"
-    "4. 不要输出画面人数/全局标签(如 1girl/2girls/standing 场景全局词)，"
-    "也不要描述其他角色\n"
-    "5. 全部标签必须来自候选区，禁止输出区外任何词"
-)
 
 
 def _sse(payload: dict) -> str:
@@ -1547,7 +1323,15 @@ def api_gallery():
     limit = min(200, max(1, int(request.args.get("limit", 60) or 60)))
     sub = (request.args.get("sub") or "").strip()
     q = (request.args.get("q") or "").strip().lower()
-    base = root / sub if sub else root
+    # sub 必须是 outputs 内的相对子目录，禁止 ../ 穿越
+    base = root
+    if sub:
+        try:
+            base = (root / sub).resolve()
+            base.relative_to(root.resolve())
+        except (ValueError, OSError):
+            return jsonify({"success": False, "error": "非法的子目录",
+                            "files": [], "total": 0}), 400
     files = []
     if base.is_dir():
         for p in base.iterdir():
@@ -1572,6 +1356,23 @@ def api_gallery():
     })
 
 
+def _resolve_in_outputs(rel: str) -> Path | None:
+    """把相对路径安全解析到 OUTPUTS_DIR 内，越界/不存在返回 None。
+
+    用 relative_to 而非 startswith：后者存在前缀漏洞
+    （outputs_evil/x.png 会被判定为在 outputs/ 内）。
+    """
+    if not rel:
+        return None
+    try:
+        root = OUTPUTS_DIR.resolve()
+        full = (root / rel).resolve()
+        full.relative_to(root)          # 越界抛 ValueError
+    except (ValueError, OSError):
+        return None
+    return full if full.is_file() else None
+
+
 @app.route("/api/gallery/img")
 def api_gallery_img():
     """从工具本地 outputs 目录读图（按相对路径，防目录穿越）。
@@ -1580,14 +1381,10 @@ def api_gallery_img():
     大幅减少加载体积；不带 w 返回原图。
     """
     f = (request.args.get("f") or "").strip()
-    root = OUTPUTS_DIR
-    if not root.is_dir() or not f:
+    if not OUTPUTS_DIR.is_dir():
         return "not found", 404
-    try:
-        full = (root / f).resolve()
-        if not str(full).startswith(str(root.resolve())) or not full.is_file():
-            return "not found", 404
-    except Exception:
+    full = _resolve_in_outputs(f)
+    if full is None:
         return "not found", 404
     w = request.args.get("w")
     if w and w.isdigit() and 16 <= int(w) <= 400:
@@ -1636,15 +1433,10 @@ def api_upscale():
     rel = (data.get("file") or "").strip()
     if not rel:
         return jsonify({"success": False, "error": "缺少图片路径"}), 400
-    root = OUTPUTS_DIR
-    try:
-        src = (root / rel).resolve()
-        if not str(src).startswith(str(root.resolve())) or not src.is_file():
-            return jsonify({"success": False,
-                            "error": "图片不在输出目录"}), 400
-    except Exception:
+    src = _resolve_in_outputs(rel)
+    if src is None:
         return jsonify({"success": False,
-                        "error": "图片路径无效"}), 400
+                        "error": "图片不在输出目录或不存在"}), 400
 
     scale = float(data.get("scale", 2.0) or 2.0)
     denoise = float(data.get("denoise", 0.5) or 0.5)
@@ -1683,7 +1475,9 @@ def api_upscale():
     try:
         path = cli.generate_img2img(
             wf, extra_prompt, safe, scale=scale, denoise=denoise,
-            seed=int(seed) if seed else None,
+            # seed 缺省=随机（传 None）；显式传 0 也按 0 处理，不再被吞掉
+            seed=(int(seed) if seed is not None and str(seed).strip() != ""
+                  else None),
             progress_cb=None)
     except Exception as e:
         log.error("[upscale] 二采执行失败: %s", e)
@@ -1761,6 +1555,14 @@ def not_found(e):
 
 @app.errorhandler(Exception)
 def handle_all_errors(e):
+    """统一错误处理。
+
+    注意：必须先放行 werkzeug 的 HTTPException（405/400/404 等），
+    否则它们会被当作 500 服务器错误返回（前端看到 "服务器错误: 405 ..."）。
+    """
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return jsonify({"error": e.description or e.name}), e.code or 500
     log.error("服务器错误: %s", e, exc_info=True)
     return jsonify({"error": f"服务器错误: {e}"}), 500
 
