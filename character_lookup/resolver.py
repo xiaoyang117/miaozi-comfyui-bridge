@@ -151,6 +151,7 @@ _ZH_NOISE_KEYS = {
     # ---- 场景/背景 ----
     "天空", "蓝天", "星空", "夜空", "大海", "海洋", "海边", "海滩",
     "沙滩", "夕阳", "日落", "黄昏", "晚霞", "早晨", "日出", "夜晚",
+    "阳光", "日光", "日光浴", "光线", "光照", "逆光", "顺光", "灯光",
     "月亮", "满月", "星星", "云", "云朵", "彩虹", "闪电", "打雷",
     "下雨", "雨天", "下雪", "雪天", "雪地", "雪", "冰", "火焰", "火",
     "岩浆", "水", "瀑布", "河流", "湖", "湖泊", "森林", "树林", "草地",
@@ -448,12 +449,22 @@ def resolve_multi(text: str, max_roles: int = 3) -> list[list[dict]]:
         return _disambiguate(cands, text) if cands else []
 
     # 1) 英文逗号分隔段（如 "shiroko_(blue_archive), hoshino_(blue_archive)"，
-    #    或 "长门, 赤城" 混排）：按逗号拆段逐个解析
+    #    或简短的 "长门, 赤城" 角色列表）：按逗号拆段逐个解析。
+    #    注意：只有每段都是"角色名形态"(纯英文标签 或 简短无描述词的中文角色名)
+    #    才走这里；含描述的自然语言句(如 "长门和拉菲，两人站在沙滩上")必须交给
+    #    下方中文名映射分支，否则会把整句当角色、导致漏识别/误判场景词。
     parts = [p for p in re.split(r"[，,、]+", text) if p.strip()]
     if len(parts) > 1:
         tag_like = re.compile(r"^[a-z0-9_\-() ]+$")
-        if all(tag_like.match(p.strip()) or re.search(r"[\u4e00-\u9fff]", p)
-               for p in parts):
+        _CN_DESC = re.compile(r"[\u4e00-\u9fff]*[的在穿站着戴和与跟及了里面]")
+        def _is_role_seg(p: str) -> bool:
+            p = p.strip()
+            if tag_like.match(p):
+                return True
+            # 中文段：仅当是简短角色名(≤4字且无描述/虚词)才按角色处理
+            return (re.search(r"[\u4e00-\u9fff]", p)
+                    and len(p) <= 4 and not _CN_DESC.search(p))
+        if all(_is_role_seg(p) for p in parts):
             for p in parts:
                 _push(_resolve_one(p))
             return out[:max_roles]

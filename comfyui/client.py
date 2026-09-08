@@ -236,12 +236,36 @@ class ComfyUIClient:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         wf = self.apply_prompt(workflow, prompt, placeholder)
         wf = self.apply_size(wf, width, height, width_placeholder, height_placeholder)
+        # 随机 KSampler seed：工作流通常带固定 seed，若不替换则同样 prompt 每次
+        # 出图完全一样，"再次生成/换一张"会失效。
+        wf = self.randomize_seed(wf)
 
         prompt_id = self.submit(wf)
         node_ids = self._detect_image_node_ids(wf, save_node_id)
         log.info("输出节点候选: %s (配置: %r)", node_ids, save_node_id)
         return self._wait_and_download(prompt_id, node_ids,
                                        progress_cb=progress_cb)
+
+    @staticmethod
+    def randomize_seed(workflow: dict, seed: Optional[int] = None) -> dict:
+        """把工作流里所有 KSampler 类节点的 seed 随机化。
+
+        返回新副本；不修改传入对象。seed=None 时用随机大整数。
+        """
+        import random as _rnd
+        wf = json.loads(json.dumps(workflow, ensure_ascii=False))
+        real_seed = seed if seed is not None else _rnd.randint(1, 2**63 - 1)
+        _SAMPLE_CLS = ("KSampler", "KSamplerAdvanced", "SamplerCustom",
+                       "SamplerCustomAdvanced")
+        for node in wf.values():
+            if not isinstance(node, dict):
+                continue
+            ct = node.get("class_type", "")
+            inputs = node.get("inputs")
+            if ct in _SAMPLE_CLS and isinstance(inputs, dict) \
+                    and "seed" in inputs:
+                inputs["seed"] = int(real_seed)
+        return wf
 
     def _detect_image_node_ids(self, wf: dict,
                                configured: str = "") -> list:

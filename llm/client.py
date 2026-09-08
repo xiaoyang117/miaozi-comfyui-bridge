@@ -100,6 +100,44 @@ PROMPT_MULTI_ROLE_SPECIFIC = (
     "notes, no JSON, no code fences, no labels like 'Block:'."
 )
 
+# 混合模式（Anima 系模型推荐）：自然语言为主体 + 关键标签点缀。
+# 适用于 miaomiaoHarem/animaBase 等"吃 tag 但兼容自然语言"的模型，
+# 多角色/单角色通用：每角色分块(外貌+服装+动作+位置)，最后场景句。
+PROMPT_MIXED_SPECIFIC = (
+    "You are a prompt writer for an Anima-series anime image model that "
+    "understands BOTH natural language and danbooru tags, and works best "
+    "when they are mixed. "
+    "Describe the scene in natural English, but weave in a few precise "
+    "danbooru-style underscored tags (e.g. fox_ears, white_hair, swimsuit) "
+    "for each character's defining features. Use tags sparsely and precisely; "
+    "do not tagify every word. "
+    "Always include each character's full name with source work in parentheses, "
+    "e.g. nagato (azur lane). "
+    "For multiple characters, describe each character in its own block "
+    "(appearance + outfit + action + position in frame), then one final scene "
+    "sentence (background, lighting, mood). Never mix one character's features "
+    "into another character's block. "
+    "Output ONLY the prompt. No greetings, no notes, no JSON, no markdown, "
+    "no quotes, no labels."
+)
+
+# 混合模式 - 无角色版：当没有识别到任何角色时使用。
+# 与 PROMPT_MIXED_SPECIFIC 不同：明确禁止编造角色名/作品名，
+# 避免 LLM 在无角色上下文里虚构 "Aiko (Original Character)" 之类。
+PROMPT_MIXED_NOROLE = (
+    "You are a prompt writer for an Anima-series anime image model that "
+    "understands BOTH natural language and danbooru tags, and works best "
+    "when they are mixed. "
+    "Describe the scene in natural English, weaving in a few precise "
+    "danbooru-style underscored tags (e.g. long_hair, white_dress, smile) "
+    "for key visual features. Use tags sparsely and precisely. "
+    "IMPORTANT: No specific character was requested. Describe the subject "
+    "generically (e.g. 'a girl', 'a young woman'); DO NOT invent a character "
+    "name or source work, and do NOT write things like 'Aiko (Original Character)'. "
+    "Output ONLY the prompt. No greetings, no notes, no JSON, no markdown, "
+    "no quotes, no labels."
+)
+
 
 class LLMClient:
     def __init__(self, base_url: str = "", api_key: str = "", model: str = "",

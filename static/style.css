@@ -570,6 +570,9 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 }
 .role-choice-card:hover { border-color: var(--accent);
   background: var(--accent-soft); }
+.role-choice-none { border-style: dashed; background: transparent; }
+.role-choice-none:hover { border-color: var(--text-faint);
+  background: transparent; }
 .role-choice-main { display: flex; align-items: baseline; gap: 8px;
   flex-wrap: wrap; }
 .role-choice-name { font-weight: 700; font-size: .9rem; }

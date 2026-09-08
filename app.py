@@ -27,6 +27,8 @@ from comfyui.client import ComfyUIClient
 from llm.client import (LLMClient, PROMPT_SYSTEM_SPECIFIC,
                         PROMPT_WITH_CONTEXT_SPECIFIC,
                         PROMPT_MULTI_ROLE_SPECIFIC,
+                        PROMPT_MIXED_SPECIFIC,
+                        PROMPT_MIXED_NOROLE,
                         SEARCH_SYSTEM_TINY, EXTRACT_CN_SYSTEM,
                         SIZE_DECIDE_SYSTEM)
 from settings import Settings
@@ -335,17 +337,55 @@ def _arrange_multirole(tag_list: list[str],
     """
     if not tag_list:
         return ""
+    # 人数标签归一：根据实际角色数，只保留一个匹配的人数标签，
+    # 移除冲突的(角色库core_tags常以 1girl 开头，公共复选又会加 2girls，
+    # 二者并存会误导画面的实际人数)。
+    _n_roles = len(roles_meta)
+    _GIRL_COUNT_TAGS = {"1girl", "1boy", "2girls", "2boys", "solo",
+                        "multiple_girls", "multiple_boys"}
+    _multi_tags = {"2girls", "2boys", "multiple_girls", "multiple_boys"}
+    _single_tags = {"1girl", "1boy", "solo"}
+    _girl_pres, _kept_others = [], []
+    for _tg in tag_list:
+        if _slugify_tag(_tg) in _GIRL_COUNT_TAGS:
+            _girl_pres.append(_tg)
+        else:
+            _kept_others.append(_tg)
+    if _n_roles >= 2:
+        # 多角色：剔除单人标签，从多人标签里只保留一个(优先具体人数2girls，
+        # 避免 2girls 与 multiple_girls 并存误导人数)
+        _girl_pres = [t for t in _girl_pres
+                      if _slugify_tag(t) not in _single_tags]
+        _multi_kept = [t for t in _girl_pres
+                       if _slugify_tag(t) in _multi_tags]
+        if _multi_kept:
+            # 已有多个多人标签时，保留更精确的一个(2girls>multiple_girls)
+            _multi_kept.sort(key=lambda t: (
+                0 if "multiple" not in t else 1,
+                0 if "2girls" in t or "2boys" in t else 1))
+            _girl_pres = [_multi_kept[0]]
+        else:
+            _girl_pres = ["multiple_girls"]
+    else:
+        # 单角色：剔除多人标签，保证至少保留一个单人标签
+        _girl_pres = [t for t in _girl_pres
+                      if _slugify_tag(t) not in _multi_tags]
+        if not any(_slugify_tag(t) in _single_tags for t in _girl_pres):
+            _girl_pres.append("1girl")
+    tag_list = _girl_pres + _kept_others
     if len(roles_meta) < 2:
         return ", ".join(tag_list)
 
     # 每个角色的特征集（规范化 slug）
     role_sets = []
+    _feat_tokens: set[str] = set()   # 所有角色特征 tag 的 token 集合(按 _ 拆)
     for rm in roles_meta:
         s = set()
         for t in re.split(r"[,\n]", rm.get("core_tags", "")):
             t2 = _slugify_tag(t)
             if t2:
                 s.add(t2)
+                _feat_tokens.update(t2.split("_"))
         role_sets.append(s)
 
     # 归类 tag_list 中每个元素
@@ -361,6 +401,18 @@ def _arrange_multirole(tag_list: list[str],
             uniq_head.append((owners[0], tg))
         else:
             rest.append(tg)
+    # 剔除 rest 里与角色特征重复的碎片词(如 fox/animal/fluff/ornament/breasts/
+    # hairband/thighhighs/animal_ears)，避免与角色块内的 fox_ears/small_breasts
+    # 等冗余、稀释权重。判定：候选标签的所有 token 均落在角色特征 token 集合内
+    # 且候选本身不是完整角色特征(已在角色块)时视为碎片词剔除。
+    if _feat_tokens:
+        def _is_feat_fragment(tg: str) -> bool:
+            toks = _slugify_tag(tg).split("_")
+            if not toks:
+                return False
+            return all(tk in _feat_tokens for tk in toks)
+        rest = [tg for tg in rest
+                if not _is_feat_fragment(tg)]
 
     # 组装：按角色顺序收集"该角色的特征"
     blocks = []
@@ -962,7 +1014,9 @@ def _run_generation(data: dict):
         roles_meta: list[dict] = []   # [{query, copyright, core_tags, ref}]
         char_core_tags = ""   # 命中角色的 core_tags 汇总（逗号拼接，供标签选词）
         role_hint = (data.get("role") or "").strip()
-        if use_search:
+        # 手动指定角色(role_hint)即使在关闭自动搜索时也要解析(用户显式意图)，
+        # 这样关闭搜索仍能保留角色的官方 core_tags 特征。
+        if use_search or role_hint:
             yield {"step": "search", "msg": "🔎 正在识别角色…"}
             cands: list = []
             multi_cands: list[list] = []   # 每个角色一组候选（多角色）
@@ -1007,14 +1061,14 @@ def _run_generation(data: dict):
                             multi_cands = [sub]
                             cands = sub
                             via = "手动指定(结合描述)"
-                    if not cands and not multi_cands:
+                    if not cands and not multi_cands and use_search:
                         multi_cands = char_resolver.resolve_multi(user_input)
                         if multi_cands:
                             cands = multi_cands[0]
                             via = "本地库直查(无LLM)"
 
-                # (2) LLM 兜底层：仅当规则层没命中时才调用
-                if not cands and not multi_cands:
+                # (2) LLM 兜底层：仅当规则层没命中且开启自动搜索时才调用
+                if not cands and not multi_cands and use_search:
                     # 先让 LLM 给英文标签（提示词已对小模型简化）
                     q = ""
                     try:
@@ -1073,6 +1127,7 @@ def _run_generation(data: dict):
                             "copyright": main_role["copyright"],
                             "via": via,
                             "role_missed": role_missed,
+                            "roles": [r["query"] for r in roles_meta],
                             "candidates": [g[0].get("character", "")
                                            for g in multi_cands],
                             "results": (raw or "")[:800],
@@ -1109,144 +1164,16 @@ def _run_generation(data: dict):
             yield {"step": "llm",
                    "msg": "🧠 生成提示词中（本地模型较慢，通常 30~60 秒，请耐心）…"}
             try:
-                # 第一步：先自由生成"草稿"（带标签风格引导）
-                draft = None
-                draft_pos_hint = ""   # 草稿中的角色位置/互动描述（单角色多候选用）
-                multi_role_direct = False  # 多角色结构化块直通(不走词库过滤)
+                # 混合模式：LLM 直接输出"自然语言 + 关键标签"提示词。
+                # 保留角色识别(core_tags 作角色资料参考)，不走 tag 复选/分块。
                 if search_info and best_ref:
                     ctx = f"角色参考资料:\n{best_ref}\n\n用户需求: {user_input}"
-                    if len(roles_meta) >= 2:
-                        # 方案A：多角色结构化块。每个角色资料已含在 best_ref，
-                        # 要求 LLM 按角色独立分块(外貌+服装+动作+位置)。
-                        ctx = (f"角色资料(每个角色一段, 必须全部保留并展开成独立块):\n"
-                               f"{best_ref}\n\n"
-                               f"用户需求: {user_input}\n\n"
-                               f"把上面的每个角色分别写成完整独立的角色块——"
-                               f"含该角色的外貌/服装/动作/位置。"
-                               f"同一画面内每个角色出现一次, 绝不互相串特征。")
-                        draft = llm._call(PROMPT_MULTI_ROLE_SPECIFIC,
-                                          ctx, history)
-                        multi_role_direct = bool(draft)
-                    else:
-                        # 单角色：自由草稿
-                        draft = llm._call(PROMPT_WITH_CONTEXT_SPECIFIC,
-                                          ctx, history)
-                        draft_pos_hint = _extract_position_hint(
-                            draft, roles_meta)
+                    prompt = llm._call(PROMPT_MIXED_SPECIFIC, ctx, history)
                 else:
-                    sp = PROMPT_SYSTEM_SPECIFIC if use_search \
-                        else llm._prompt_system
-                    draft = llm._call(sp, user_input, history)
-                # 剥掉草稿里的 [composition] 块（位置句已单独提取，
-                # 避免它污染词库校验/复选/直通 prompt）
-                if draft and not multi_role_direct:
-                    draft = _COMP_BLOCK.sub("", draft or "").strip(
-                        " ,，、\n")
-
-                # 标签化处理：词库可用 + 总开关开启
-                # 多角色结构化块直通时不进词库(草稿即最终 prompt)
-                tag_prompt = None
-                if not multi_role_direct and \
-                        settings.tag_selection and char_tags.is_available():
-                    if settings.tag_reselect:
-                        # 复选开：每个角色的特征单独成组(尽量多选保本体)，
-                        # 画面标签一个池（数量随草稿长度），一次调用挑完。
-                        trait_groups: list[list[str]] = []
-                        if roles_meta:
-                            for rm in roles_meta:
-                                grp = []
-                                for t in re.split(r"[,\n]",
-                                                  rm.get("core_tags", "")):
-                                    t2 = t.strip().replace(" ", "_")
-                                    if t2 and t2 not in grp:
-                                        grp.append(t2)
-                                if grp:
-                                    trait_groups.append(grp)
-                        else:
-                            # 无角色库命中：从草稿/输入取不了官方特征，
-                            # 角色特征区退化为空（纯画面复选）
-                            trait_groups = []
-                        scene_cands = char_tags.recall_candidates(
-                            draft or user_input, limit=180)
-                        n_roles = len(trait_groups)
-                        if (n_roles or len(scene_cands) >= 20):
-                            ctx_parts = [f"用户需求：{user_input}"]
-                            if draft:
-                                ctx_parts.append(f"参考草稿：{draft}")
-                            if n_roles:
-                                zone_parts = []
-                                for gi, grp in enumerate(trait_groups, 1):
-                                    label = (f"角色{gi}特征区（角色{gi}的"
-                                             "形象特征，尽量多选其中与角色"
-                                             "相符的；区内若冲突(如不同发色)"
-                                             "只选一个）")
-                                    zone_parts.append(label + "：\n"
-                                                      + ", ".join(grp))
-                                zone_text = "\n\n".join(zone_parts)
-                                if n_roles > 1:
-                                    zone_text = (
-                                        "画面包含多个角色，每个角色的特征区"
-                                        "都要尽量多选，保证两人形象完整。\n"
-                                        + zone_text)
-                                ctx_parts.append(zone_text)
-                            if scene_cands:
-                                s_lo, s_hi = _scene_pick_range(draft)
-                                # 候选不足时收窄上限
-                                s_hi = min(s_hi, len(scene_cands))
-                                ctx_parts.append(
-                                    f"画面区（从画面区选 {s_lo}~{s_hi} 个标签，"
-                                    "覆盖姿态/场景/服饰/氛围；"
-                                    "多角色时补充 2girls/multiple_girls/"
-                                    "siblings 等人数标签；草稿已合适的画面"
-                                    "标签可保留并计入此数）：\n"
-                                    + char_tags.format_candidates(scene_cands))
-                            ctx = "\n\n".join(ctx_parts)
-                            try:
-                                picked = llm._call(TAG_SELECT_SYSTEM, ctx, [])
-                            except Exception:
-                                picked = ""
-                            if picked:
-                                tag_prompt = char_tags.validate_tags(picked)
-                                # 角色特征高优先级兜底：每组内补回未冲突特征
-                                if trait_groups:
-                                    kept = set(tag_prompt)
-                                    for grp in trait_groups:
-                                        for t in grp:
-                                            if t in kept:
-                                                continue
-                                            # 组内已有同维度冲突特征则跳过
-                                            conflict = any(
-                                                c in kept and c in grp
-                                                and _core_tags_conflict(t, [c])
-                                                for c in grp)
-                                            if not conflict:
-                                                tag_prompt.append(t)
-                                                kept.add(t)
-                                log.info(
-                                    "[%s] 标签复选: %d角色特征%d 画面%d -> %d",
-                                    gid, len(trait_groups),
-                                    sum(len(g) for g in trait_groups),
-                                    len(scene_cands), len(tag_prompt))
-                    if not tag_prompt:
-                        # 复选关（或复选失败）：直接校验草稿，剔除不在词库的词
-                        tag_prompt = char_tags.validate_tags(draft or "")
-                        log.info("[%s] 标签校验(无复选): %d 字 -> %d 标签",
-                                 gid, len(draft or ""), len(tag_prompt))
-
-                if tag_prompt:
-                    # 校验/复选出的真实标签作为提示词主体
-                    # 多角色时按角色分块（特征贴角色名）防串
-                    if len(roles_meta) >= 2:
-                        prompt = _arrange_multirole(
-                            tag_prompt, roles_meta, draft_pos_hint)
-                    else:
-                        prompt = ", ".join(tag_prompt)
-                else:
-                    # 回退：草稿原样使用（词库不可用/总开关关/校验全被剔）
-                    prompt = draft or ""
-                    if prompt and len(roles_meta) >= 2:
-                        if draft_pos_hint:
-                            prompt = f"{prompt}, {draft_pos_hint}"
+                    # 无角色资料：用无角色专用混合模式(禁止编造角色名/作品名)，
+                    # 避免 LLM 虚构 "Aiko (Original Character)" 之类；强约束只输出 prompt
+                    prompt = llm._call(PROMPT_MIXED_NOROLE, user_input, history)
+                prompt = (prompt or "").strip()
                 if not prompt:
                     raise RuntimeError("LLM 返回了空提示词")
                 # 角色已命中但 LLM 漏输出角色标签时，前置注入（确定性兜底，
@@ -1408,6 +1335,23 @@ TAG_SELECT_SYSTEM = (
     "沿用仍适用的标签并补入新场景标签"
 )
 
+# 单角色复选系统提示词（方案B：多角色/单角色都逐角色独立复选）。
+# 每次调用只负责【一个角色】：
+#   输出 = 角色名标签, 该角色特征标签, 该角色专属场景标签。
+# 不混入其他角色、不输出画面全局标签(2girls等由最后公共复选负责)。
+TAG_SELECT_SYSTEM_SINGLE = (
+    "你是一个 danbooru 标签选择器。下面是画面需求、参考草稿和一个角色的特征区。\n"
+    "请从中挑选标签，只描述【这一个角色】。\n"
+    "要求：\n"
+    "1. 只输出选中标签的英文名，逗号+空格分隔，不要序号不要解释\n"
+    "2. 先输出 该角色名标签, 再紧跟该角色的特征标签（尽量全部选中与角色相符的；"
+    "区内若冲突(如不同发色)只选最贴合的一个）\n"
+    "3. 可以补充该角色专属的场景/服饰/动作标签(须来自草稿或特征区)\n"
+    "4. 不要输出画面人数/全局标签(如 1girl/2girls/standing 场景全局词)，"
+    "也不要描述其他角色\n"
+    "5. 全部标签必须来自候选区，禁止输出区外任何词"
+)
+
 
 def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -1500,9 +1444,10 @@ def api_resolve_role():
             if not cands:
                 continue
             items = [_item(d) for d in cands[:5]]
-            unique_cps = {d.get("copyright") for d in cands[:5]}
-            need = len(unique_cps) > 1
-            any_choice = any_choice or need
+            # 只要识别到角色就让用户确认(含无歧义的单候选)，
+            # 由用户选择保留/剔除；"无"选项在前端提供。
+            need = True
+            any_choice = True
             roles_out.append({
                 "label": f"角色{i}",
                 "need_choice": need,

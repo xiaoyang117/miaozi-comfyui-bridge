@@ -24,3 +24,11 @@ character_lookup/tag_full.sqlite
 # 本地保留, 不入库）。danbooru-10w-zh_cn.txt 为 Aligadai 备选源（无分类, 未使用）
 character_lookup/tag.sqlite
 character_lookup/danbooru-10w-zh_cn.txt
+
+# 开发备份 / 快捷方式 / 工作流副本（不入库）
+app.py.bak_*
+*.bak
+*.lnk
+workflows/*_copy.json
+workflows/* 副本*.json
+
