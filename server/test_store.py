@@ -34,8 +34,14 @@ class StoreContextTest(unittest.TestCase):
                                meta={"character_id": "hatsune_miku"})
         self.assertEqual(self.store.last_assistant_character_id(self.session),
                          "hatsune_miku")
+        self.store.add_message(self.session, "assistant",
+                               meta={"character_ids": ["shiroko", "hatsune_miku"],
+                                     "character_id": "shiroko"})
+        self.assertEqual(self.store.last_assistant_character_ids(self.session),
+                         ["shiroko", "hatsune_miku"])
         self.store.add_message(self.session, "assistant")
         self.assertEqual(self.store.last_assistant_character_id(self.session), "")
+        self.assertEqual(self.store.last_assistant_character_ids(self.session), [])
 
 
 if __name__ == "__main__":

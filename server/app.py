@@ -43,6 +43,7 @@ app.config["JSON_AS_ASCII"] = False
 
 # 同一时间只跑一个生成任务，避免把本地显卡打满
 _gen_lock = threading.Lock()
+MAX_CHARACTERS = 4
 
 # 不需要口令校验的路径
 _OPEN_PATHS = ("/static/", "/favicon.ico")
@@ -353,45 +354,109 @@ def _references_previous_character(prompt: str) -> bool:
     return bool(
         re.search(r"(?<!其)[她他](?:们)?|这个角色|该角色|这名角色|上述角色|前面的角色",
                   prompt)
-        or re.search(r"\b(?:she|her|hers|he|him|his|that character|the character)\b",
-                     prompt, re.IGNORECASE)
+        or re.search(
+            r"\b(?:she|her|hers|he|him|his|they|them|their|both|"
+            r"that character|the character)\b", prompt, re.IGNORECASE)
     )
 
 
-def _previous_character(prompt: str, session_id: str,
-                        use_history: bool) -> dict | None:
+def _references_multiple_previous_characters(prompt: str) -> bool:
+    return bool(
+        re.search(r"[她他]们|两人|两位|两名角色|她和他|他和她|两个人", prompt)
+        or re.search(r"\b(?:they|them|their|both)\b", prompt, re.IGNORECASE)
+    )
+
+
+def _previous_characters(prompt: str, session_id: str,
+                         use_history: bool) -> list[dict]:
     if not use_history or not session_id or not _references_previous_character(prompt):
-        return None
-    character_id = store.last_assistant_character_id(session_id)
-    return get_character(character_id) if character_id else None
+        return []
+    ids = store.last_assistant_character_ids(session_id)
+    if not ids:
+        single = store.last_assistant_character_id(session_id)
+        ids = [single] if single else []
+    if len(ids) > 1 and not _references_multiple_previous_characters(prompt):
+        return []
+    characters = []
+    for character_id in dict.fromkeys(ids[:MAX_CHARACTERS]):
+        character = get_character(character_id)
+        if character:
+            characters.append(character)
+    return characters
+
+
+def _character_group(query: str, candidates: list,
+                     source: str = "database") -> dict:
+    public = [{"character": c["character"], "name": c["name"],
+               "copyright": c["copyright_name"]} for c in candidates]
+    if not public:
+        status, message = "not_found", f"未找到：{query}"
+    elif len(public) > 1:
+        status, message = "ambiguous", f"{query} 有多个同名角色，请选择作品"
+    else:
+        status = "matched"
+        label = "沿用上一轮角色" if source == "history" else "已匹配"
+        message = f"{label}：{public[0]['name']}（{public[0]['copyright']}）"
+    return {"query": query, "status": status, "source": source,
+            "message": message, "candidates": public}
 
 
 def _resolve_character(prompt: str, session_id: str = "",
                        use_history: bool = True) -> dict:
-    candidates = direct_candidates(prompt, limit=20)
-    if not candidates:
+    direct = direct_candidates(prompt, limit=20)
+    if direct:
+        queries = [(prompt, direct)]
+    else:
         tags = _make_llm().extract_tags(prompt)
-        if not tags or tags.strip().lower() in ("无", "none", "no character"):
-            previous = _previous_character(prompt, session_id, use_history)
-            if previous:
-                public = {"character": previous["character"],
-                          "name": previous["name"],
-                          "copyright": previous["copyright_name"]}
-                return {"status": "matched", "source": "history",
-                        "message": f"沿用上一轮角色：{public['name']}（{public['copyright']}）",
-                        "candidates": [public]}
-            return {"status": "not_found", "message": "未识别到明确的角色名", "candidates": []}
-        candidates = find_candidates(tags, limit=20)
-    if not candidates:
-        return {"status": "not_found", "message": "角色库未找到匹配角色", "candidates": []}
-    public = [{"character": c["character"], "name": c["name"],
-               "copyright": c["copyright_name"]} for c in candidates]
-    if len(candidates) > 1:
-        return {"status": "ambiguous", "message": "找到多个同名角色，请选择作品",
-                "candidates": public}
-    return {"status": "matched", "source": "database",
-            "message": f"已匹配：{public[0]['name']}（{public[0]['copyright']}）",
-            "candidates": public}
+        queries = []
+        seen = set()
+        for line in tags.splitlines():
+            query = re.sub(r"^\s*(?:\d+[.)]|[-•])\s*", "", line).strip()
+            if not query or query.lower() in ("无", "none", "no character"):
+                continue
+            query = re.sub(r"\s*[|｜]\s*", ", ", query, count=1)
+            key = query.lower()
+            if key not in seen:
+                candidates = find_candidates(query, limit=20)
+                if not candidates and query.count(",") == 1:
+                    first, second = (part.strip() for part in query.split(",", 1))
+                    first_matches = find_candidates(first, limit=20)
+                    second_matches = find_candidates(second, limit=20)
+                    if (first_matches and second_matches
+                            and len(queries) <= MAX_CHARACTERS - 2):
+                        queries.extend([(first, first_matches), (second, second_matches)])
+                        seen.update((first.lower(), second.lower()))
+                        continue
+                queries.append((query, candidates))
+                seen.add(key)
+            if len(queries) >= MAX_CHARACTERS:
+                break
+    groups = [_character_group(query, candidates) for query, candidates in queries]
+    if not groups or re.search(r"和|与|跟|一起|旁边|身旁|alongside|together with",
+                               prompt, re.IGNORECASE):
+        existing = {c["character"] for group in groups for c in group["candidates"]}
+        for previous in _previous_characters(prompt, session_id, use_history):
+            if previous["character"] not in existing and len(groups) < MAX_CHARACTERS:
+                groups.append(_character_group(previous["name"], [previous], "history"))
+                existing.add(previous["character"])
+    if not groups:
+        if (use_history and session_id and _references_previous_character(prompt)
+                and not _references_multiple_previous_characters(prompt)
+                and len(store.last_assistant_character_ids(session_id)) > 1):
+            return {"status": "ambiguous_reference",
+                    "message": "上一轮有多位角色，请写明要修改哪位角色",
+                    "groups": [], "candidates": []}
+        return {"status": "not_found", "message": "未识别到明确的角色名",
+                "groups": [], "candidates": []}
+    status = ("ambiguous" if any(g["status"] == "ambiguous" for g in groups)
+              else "matched" if any(g["status"] == "matched" for g in groups)
+              else "not_found")
+    return {"status": status,
+            "message": "；".join(g["message"] for g in groups),
+            "groups": groups,
+            "source": ("history" if all(g["source"] == "history" for g in groups)
+                       else "database"),
+            "candidates": groups[0]["candidates"] if len(groups) == 1 else []}
 
 
 @app.route("/api/characters/resolve", methods=["POST"])
@@ -509,24 +574,47 @@ def _run_generation(payload: dict):
 
     # ---------- 1. 角色库检索 ----------
     character_info = ""
-    character = None
+    characters = []
+    inherited_ids = set()
     character_status = "角色库检索已关闭"
     if use_character and not char_db_built():
         character_status = "角色库未建立，已跳过检索"
     elif use_character:
         yield _sse({"step": "search"})
         try:
-            selected = payload.get("character_id") or ""
             if payload.get("character_checked") is True:
-                character = get_character(selected) if isinstance(selected, str) else None
-                if character:
+                selected = payload.get("character_ids")
+                if not isinstance(selected, list):
+                    selected = [payload.get("character_id")]
+                seen = set()
+                for character_id in selected[:MAX_CHARACTERS]:
+                    if not isinstance(character_id, str) or character_id in seen:
+                        continue
+                    seen.add(character_id)
+                    character = get_character(character_id)
+                    if character:
+                        characters.append(character)
+                if characters:
                     prefix = ("沿用上一轮角色"
                               if payload.get("character_reason") == "history"
                               else "已匹配")
-                    character_status = f"{prefix}：{character['name']}（{character['copyright_name']}）"
+                    names = "、".join(
+                        f"{c['name']}（{c['copyright_name']}）" for c in characters)
+                    character_status = f"{prefix}：{names}"
+                    missing = payload.get("character_missing")
+                    if isinstance(missing, int) and 0 < missing <= MAX_CHARACTERS:
+                        character_status += f"；另有 {missing} 位角色未命中"
+                    inherited = payload.get("inherited_character_ids")
+                    if use_history and isinstance(inherited, list):
+                        previous_ids = set(store.last_assistant_character_ids(session_id))
+                        inherited_ids = {
+                            value for value in inherited
+                            if isinstance(value, str) and value in previous_ids
+                        }
                 else:
                     character_status = {
                         "not_found": "未识别到角色或角色库中没有匹配项",
+                        "ambiguous_reference": "上一轮有多位角色，请写明要修改哪位角色",
                         "ambiguous": "多个候选角色，未选择",
                         "cancelled": "已跳过角色选择",
                         "error": "角色检索失败，已跳过",
@@ -534,12 +622,26 @@ def _run_generation(payload: dict):
             else:
                 resolved = _resolve_character(user_input, session_id, use_history)
                 character_status = resolved["message"]
-                candidates = resolved["candidates"]
-                character = (get_character(candidates[0]["character"])
-                             if resolved["status"] == "matched" else None)
-            if character:
-                character_info = format_character(character)
+                seen = set()
+                for group in resolved["groups"]:
+                    if group["status"] == "matched":
+                        character = get_character(group["candidates"][0]["character"])
+                        if character and character["character"] not in seen:
+                            characters.append(character)
+                            seen.add(character["character"])
+                            if group["source"] == "history":
+                                inherited_ids.add(character["character"])
+            if len(characters) == 1:
+                character_info = format_character(characters[0])
+            elif characters:
+                character_info = "\n\n".join(
+                    f"角色 {index}（{c['name']}，{c['copyright_name']}"
+                    f"{'，上一轮沿用角色' if c['character'] in inherited_ids else ''}）：\n"
+                    f"{format_character(c, max_tags=40)}"
+                    for index, c in enumerate(characters, start=1))
         except Exception as e:
+            characters = []
+            character_info = ""
             character_status = f"角色检索失败：{e}"
     yield _sse({"step": "character", "message": character_status})
 
@@ -599,8 +701,9 @@ def _run_generation(payload: dict):
                       meta={"width": width, "height": height,
                             "elapsed": result.get("elapsed"),
                             "character_status": character_status,
-                            "character_id": (character["character"]
-                                             if character else "")})
+                            "character_id": (characters[0]["character"]
+                                             if characters else ""),
+                            "character_ids": [c["character"] for c in characters]})
 
     yield _sse({"step": "done", "image": image_url, "prompt": prompt,
                 "character": character_info, "vlm": vlm_text,

@@ -172,22 +172,33 @@ class Store:
                 pending_user = None
         return pairs[-rounds:]
 
-    def last_assistant_character_id(self, session_id: str) -> str:
+    def last_assistant_character_ids(self, session_id: str) -> list[str]:
         with self._lock, self._conn() as conn:
             row = conn.execute(
                 "SELECT meta, character FROM messages WHERE session_id = ? "
                 "AND role = 'assistant' ORDER BY id DESC LIMIT 1",
                 (session_id,)).fetchone()
         if not row:
-            return ""
+            return []
         try:
             meta = json.loads(row["meta"] or "{}")
         except (TypeError, ValueError):
             meta = {}
-        if isinstance(meta, dict) and isinstance(meta.get("character_id"), str):
-            return meta["character_id"]
+        if isinstance(meta, dict):
+            ids = meta.get("character_ids")
+            if isinstance(ids, list):
+                return [value for value in ids if isinstance(value, str) and value]
+            single = meta.get("character_id")
+            if isinstance(single, str):
+                return [single] if single else []
         first_line = (row["character"] or "").split("\n", 1)[0]
-        return first_line.removeprefix("角色: ").strip() if first_line.startswith("角色: ") else ""
+        if first_line.startswith("角色: "):
+            return [first_line.removeprefix("角色: ").strip()]
+        return []
+
+    def last_assistant_character_id(self, session_id: str) -> str:
+        ids = self.last_assistant_character_ids(session_id)
+        return ids[0] if ids else ""
 
 
 store = Store()
