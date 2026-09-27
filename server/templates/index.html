@@ -768,13 +768,19 @@ async function sendMessage() {
       setStep('search');
       try {
         const resolvedResponse = await api('/api/characters/resolve', {
-          method: 'POST', body: {prompt: text, use_search: true},
+          method: 'POST', body: {
+            prompt: text,
+            session_id: S.currentSession,
+            use_search: true,
+            use_history: body.use_history,
+          },
         });
         const resolved = await resolvedResponse.json();
         if (!resolvedResponse.ok) throw new Error(resolved.error || '角色检索失败');
         body.character_checked = true;
         if (resolved.status === 'matched') {
           body.character_id = resolved.candidates[0].character;
+          body.character_reason = resolved.source;
         } else if (resolved.status === 'ambiguous') {
           const candidates = resolved.candidates;
           const choices = candidates.map((item, i) =>

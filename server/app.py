@@ -10,6 +10,7 @@ import base64
 import glob as globmod
 import json
 import os
+import re
 import threading
 import uuid
 from pathlib import Path
@@ -348,11 +349,37 @@ def test_characters():
                     "error": f"未找到「{query}」，角色名请用英文或罗马音"})
 
 
-def _resolve_character(prompt: str) -> dict:
+def _references_previous_character(prompt: str) -> bool:
+    return bool(
+        re.search(r"(?<!其)[她他](?:们)?|这个角色|该角色|这名角色|上述角色|前面的角色",
+                  prompt)
+        or re.search(r"\b(?:she|her|hers|he|him|his|that character|the character)\b",
+                     prompt, re.IGNORECASE)
+    )
+
+
+def _previous_character(prompt: str, session_id: str,
+                        use_history: bool) -> dict | None:
+    if not use_history or not session_id or not _references_previous_character(prompt):
+        return None
+    character_id = store.last_assistant_character_id(session_id)
+    return get_character(character_id) if character_id else None
+
+
+def _resolve_character(prompt: str, session_id: str = "",
+                       use_history: bool = True) -> dict:
     candidates = direct_candidates(prompt, limit=20)
     if not candidates:
         tags = _make_llm().extract_tags(prompt)
         if not tags or tags.strip().lower() in ("无", "none", "no character"):
+            previous = _previous_character(prompt, session_id, use_history)
+            if previous:
+                public = {"character": previous["character"],
+                          "name": previous["name"],
+                          "copyright": previous["copyright_name"]}
+                return {"status": "matched", "source": "history",
+                        "message": f"沿用上一轮角色：{public['name']}（{public['copyright']}）",
+                        "candidates": [public]}
             return {"status": "not_found", "message": "未识别到明确的角色名", "candidates": []}
         candidates = find_candidates(tags, limit=20)
     if not candidates:
@@ -362,7 +389,8 @@ def _resolve_character(prompt: str) -> dict:
     if len(candidates) > 1:
         return {"status": "ambiguous", "message": "找到多个同名角色，请选择作品",
                 "candidates": public}
-    return {"status": "matched", "message": f"已匹配：{public[0]['name']}（{public[0]['copyright']}）",
+    return {"status": "matched", "source": "database",
+            "message": f"已匹配：{public[0]['name']}（{public[0]['copyright']}）",
             "candidates": public}
 
 
@@ -377,7 +405,9 @@ def api_resolve_character():
     if not prompt:
         return jsonify({"error": "请输入图片描述"}), 400
     try:
-        return jsonify(_resolve_character(prompt))
+        return jsonify(_resolve_character(
+            prompt, str(data.get("session_id") or ""),
+            bool(data.get("use_history", True))))
     except Exception as e:
         return jsonify({"error": f"角色检索失败：{e}"}), 500
 
@@ -479,6 +509,7 @@ def _run_generation(payload: dict):
 
     # ---------- 1. 角色库检索 ----------
     character_info = ""
+    character = None
     character_status = "角色库检索已关闭"
     if use_character and not char_db_built():
         character_status = "角色库未建立，已跳过检索"
@@ -489,7 +520,10 @@ def _run_generation(payload: dict):
             if payload.get("character_checked") is True:
                 character = get_character(selected) if isinstance(selected, str) else None
                 if character:
-                    character_status = f"已匹配：{character['name']}（{character['copyright_name']}）"
+                    prefix = ("沿用上一轮角色"
+                              if payload.get("character_reason") == "history"
+                              else "已匹配")
+                    character_status = f"{prefix}：{character['name']}（{character['copyright_name']}）"
                 else:
                     character_status = {
                         "not_found": "未识别到角色或角色库中没有匹配项",
@@ -498,7 +532,7 @@ def _run_generation(payload: dict):
                         "error": "角色检索失败，已跳过",
                     }.get(payload.get("character_reason"), "未找到可用的角色特征")
             else:
-                resolved = _resolve_character(user_input)
+                resolved = _resolve_character(user_input, session_id, use_history)
                 character_status = resolved["message"]
                 candidates = resolved["candidates"]
                 character = (get_character(candidates[0]["character"])
@@ -564,7 +598,9 @@ def _run_generation(payload: dict):
                       image=image_url, character=character_info,
                       meta={"width": width, "height": height,
                             "elapsed": result.get("elapsed"),
-                            "character_status": character_status})
+                            "character_status": character_status,
+                            "character_id": (character["character"]
+                                             if character else "")})
 
     yield _sse({"step": "done", "image": image_url, "prompt": prompt,
                 "character": character_info, "vlm": vlm_text,

@@ -136,9 +136,9 @@ class Store:
         with self._lock, self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM messages WHERE session_id = ? "
-                "ORDER BY id ASC LIMIT ?", (session_id, limit)).fetchall()
+                "ORDER BY id DESC LIMIT ?", (session_id, limit)).fetchall()
         out = []
-        for r in rows:
+        for r in reversed(rows):
             item = dict(r)
             try:
                 item["meta"] = json.loads(item.get("meta") or "{}")
@@ -171,6 +171,23 @@ class Store:
                 pairs.append((pending_user, m["content"]))
                 pending_user = None
         return pairs[-rounds:]
+
+    def last_assistant_character_id(self, session_id: str) -> str:
+        with self._lock, self._conn() as conn:
+            row = conn.execute(
+                "SELECT meta, character FROM messages WHERE session_id = ? "
+                "AND role = 'assistant' ORDER BY id DESC LIMIT 1",
+                (session_id,)).fetchone()
+        if not row:
+            return ""
+        try:
+            meta = json.loads(row["meta"] or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+        if isinstance(meta, dict) and isinstance(meta.get("character_id"), str):
+            return meta["character_id"]
+        first_line = (row["character"] or "").split("\n", 1)[0]
+        return first_line.removeprefix("角色: ").strip() if first_line.startswith("角色: ") else ""
 
 
 store = Store()
