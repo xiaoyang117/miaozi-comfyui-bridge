@@ -666,6 +666,11 @@ def _run_generation(payload: dict):
         yield _sse({"step": "error", "error": "模型没有返回提示词，请重试"})
         return
 
+    positive_prefix = (str(settings.get("positive_prompt_prefix") or "")
+                       .strip().rstrip(",").rstrip())
+    if positive_prefix:
+        prompt = f"{positive_prefix}, {prompt}"
+
     # ---------- 3. 引擎驱动 ComfyUI 出图 ----------
     yield _sse({"step": "comfyui"})
     replacements = settings.build_replacements(prompt, width, height)

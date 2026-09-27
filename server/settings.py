@@ -85,6 +85,7 @@ DEFAULT_SETTINGS = {
 
     # ---- 提示词风格 ----
     "custom_system_prompt": "",
+    "positive_prompt_prefix": "",
     "prompt_instructions": "",
 
     # ---- 对话 ----
