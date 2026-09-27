@@ -148,17 +148,17 @@
           <option value="direct">直连远程 API</option>
         </select>
         <label>API 地址</label>
-        <input id="s_llm_base_url" placeholder="https://api.openai.com/v1">
+        <input id="s_llm_base_url" type="text" placeholder="https://api.openai.com/v1">
         <label>API Key</label>
         <input id="s_llm_api_key" type="password" autocomplete="new-password">
         <label>远程 API 模型名称（direct 模式用）</label>
-        <input id="s_llm_model">
+        <input id="s_llm_model" type="text">
         <label>本机模型地址（local 模式用）</label>
-        <input id="s_local_llm_base_url" placeholder="http://127.0.0.1:8080/v1">
+        <input id="s_local_llm_base_url" type="text" placeholder="http://127.0.0.1:8080/v1">
         <label>本机模型 API Key（可选）</label>
         <input id="s_local_llm_api_key" type="password" autocomplete="new-password">
         <label>本机模型名称（local 模式用）</label>
-        <input id="s_local_llm_model" placeholder="llama-server 随意填，Ollama 填真实模型名">
+        <input id="s_local_llm_model" type="text" placeholder="llama-server 随意填，Ollama 填真实模型名">
         <label>超时（秒）</label>
         <input id="s_llm_timeout" type="number" min="10" max="900">
         <button class="btn-secondary" onclick="testLLM()">测试连接</button>
@@ -167,11 +167,11 @@
       <div class="settings-group">
         <h3>VLM 图片识别</h3>
         <label>API 地址（留空则关闭图片识别）</label>
-        <input id="s_vlm_base_url" placeholder="https://.../v1">
+        <input id="s_vlm_base_url" type="text" placeholder="https://.../v1">
         <label>API Key</label>
         <input id="s_vlm_api_key" type="password" autocomplete="new-password">
         <label>模型名称</label>
-        <input id="s_vlm_model" placeholder="gemini-2.5-flash">
+        <input id="s_vlm_model" type="text" placeholder="gemini-2.5-flash">
         <button class="btn-secondary" onclick="testVLM()">测试连接</button>
       </div>
 
@@ -185,13 +185,13 @@
           </label>
         </div>
         <label>comfy-mcp 命令（venv 装的填绝对路径）</label>
-        <input id="s_mcp_command" placeholder="comfy-mcp 或 C:/.../Scripts/comfy-mcp.exe">
+        <input id="s_mcp_command" type="text" placeholder="comfy-mcp 或 C:/.../Scripts/comfy-mcp.exe">
         <label>ComfyUI 工作区目录（便携版必填）</label>
-        <input id="s_comfy_project" placeholder="H:/ComfyUI_windows_portable/ComfyUI">
+        <input id="s_comfy_project" type="text" placeholder="H:/ComfyUI_windows_portable/ComfyUI">
         <label>comfy 命令路径（venv 装的填绝对路径）</label>
-        <input id="s_comfy_bin" placeholder="C:/.../Scripts/comfy.exe">
+        <input id="s_comfy_bin" type="text" placeholder="C:/.../Scripts/comfy.exe">
         <label>ComfyUI 地址</label>
-        <input id="s_comfyui_url" placeholder="http://127.0.0.1:8188">
+        <input id="s_comfyui_url" type="text" placeholder="http://127.0.0.1:8188">
         <button class="btn-secondary" onclick="testComfy()">测试连接</button>
         <div id="comfyInfo" class="hint"></div>
       </div>
@@ -199,21 +199,20 @@
       <div class="settings-group">
         <h3>工作流与占位符</h3>
         <label>当前工作流</label>
-        <input id="s_workflow_path" placeholder="/path/to/workflow.json">
+        <input id="s_workflow_path" type="text" placeholder="/path/to/workflow.json">
         <button class="btn-secondary" onclick="loadWorkflowList(true)">从本地刷新列表</button>
         <label>提示词占位符</label>
-        <input id="s_prompt_placeholder" placeholder="114514.1919810">
+        <input id="s_prompt_placeholder" type="text" placeholder="114514.1919810">
         <label>保存节点 ID</label>
-        <input id="s_save_node_id" placeholder="9">
+        <input id="s_save_node_id" type="text" placeholder="9">
         <label>宽度占位符（可选）</label>
-        <input id="s_width_placeholder" placeholder="留空表示不替换">
+        <input id="s_width_placeholder" type="text" placeholder="留空表示不替换">
         <label>高度占位符（可选）</label>
-        <input id="s_height_placeholder" placeholder="留空表示不替换">
-        <label>默认宽 / 高</label>
-        <div class="two-col">
-          <input id="s_gen_width" type="number" min="64" max="4096">
-          <input id="s_gen_height" type="number" min="64" max="4096">
-        </div>
+        <input id="s_height_placeholder" type="text" placeholder="留空表示不替换">
+        <label for="s_gen_width">默认宽度</label>
+        <input id="s_gen_width" type="number" min="64" max="4096">
+        <label for="s_gen_height">默认高度</label>
+        <input id="s_gen_height" type="number" min="64" max="4096">
         <label>分辨率预设（JSON 数组）</label>
         <textarea id="s_resolution_presets" rows="5" spellcheck="false"></textarea>
         <p class="hint">工作流里写上占位符（如 chang / gao）才会被替换。</p>
@@ -236,7 +235,7 @@
         <h3>角色库</h3>
         <div id="charDbState" class="dim">检测中</div>
         <label>测试查询</label>
-        <input id="s_character_query" placeholder="shiroko 或 shiroko, blue_archive">
+        <input id="s_character_query" type="text" placeholder="shiroko 或 shiroko, blue_archive">
         <button class="btn-secondary" onclick="testCharacters()">查询</button>
         <div class="check-row">
           <label class="toggle-label" style="margin:0">
