@@ -404,6 +404,7 @@ function renderSessions() {
   if (!sessions.length) {
     const empty = document.createElement('div');
     empty.className = 'session-empty';
+    empty.setAttribute('role', 'status');
     empty.textContent = query ? '没有找到匹配的对话' : '还没有对话，开始创作吧';
     box.appendChild(empty);
     return;
