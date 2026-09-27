@@ -71,8 +71,9 @@ python app.py
 
 打开 <http://127.0.0.1:5000>，进**配置**页：
 
-1. 「LLM」执行位置选 `直连本机模型`，地址默认 `http://127.0.0.1:8080/v1`；
-   llama-server 忽略模型名（随便填），Ollama / LM Studio 要填真实模型名
+1. 「LLM」填写 API 地址、API Key 和模型名称。本机 llama-server 地址通常是
+   `http://127.0.0.1:8080/v1`，API Key 可留空、模型名可填 `local-model`；
+   Ollama / LM Studio 填各自的地址和真实模型名。远程服务填其 OpenAI 兼容 API 地址、Key 和模型名
 2. 「ComfyUI 与 MCP」里填：
    - **ComfyUI 工作区目录**：便携版必填，见下面的坑
    - **comfy-mcp 命令**：装在 venv 里就填绝对路径，如
@@ -128,9 +129,9 @@ python server/character_lookup/build_db.py --skip-download
 
 | 项目 | 说明 |
 | --- | --- |
-| **LLM 执行位置** | `local` = 直连本机模型（llama.cpp / Ollama / LM Studio）；`direct` = 直连远程 API |
-| **本机模型地址** | local 模式用，默认 llama-server `http://127.0.0.1:8080/v1` |
-| **本机模型名称** | local 模式用；llama-server 忽略，Ollama / LM Studio 填真实模型名 |
+| **LLM API 地址** | 本机 llama-server 常用 `http://127.0.0.1:8080/v1`；远程服务填写其 OpenAI 兼容接口地址 |
+| **LLM API Key** | 本机模型通常可留空；远程服务按需填写 |
+| **LLM 模型名称** | llama-server 可填 `local-model`；Ollama / LM Studio 及远程服务填实际模型名 |
 | **comfy-mcp 命令** | MCP 服务端启动命令，venv 装的填绝对路径 |
 | **ComfyUI 工作区** | 便携版必填，否则 comfy-cli 用默认空目录 |
 | **comfy 命令路径** | comfy-cli 在 venv 里才需要填 |

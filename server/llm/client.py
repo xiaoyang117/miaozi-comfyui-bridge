@@ -1,13 +1,9 @@
-"""LLM 调用客户端，支持两种执行位置。
+"""通过 OpenAI 兼容接口调用本机或远程 LLM。"""
 
-  local  —— 直连本机模型服务（Ollama / LM Studio / llama.cpp 等）
-  direct —— 请求远程 OpenAI 兼容 API
-
-对上层暴露同一个 call() 接口，切换模式不用改任何业务代码。
-"""
-
+import ipaddress
 import json
 import re
+from urllib.parse import urlsplit
 
 import requests
 
@@ -42,27 +38,36 @@ class LLMClient:
     """一次生成流程复用一个实例，避免重复读配置。"""
 
     def __init__(self, config: dict) -> None:
-        mode = config.get("mode") or "direct"
-        if mode == "bridge":          # 兼容历史配置
-            mode = "local"
-        self.mode = mode
         self.base_url = str(config.get("base_url") or "").rstrip("/")
         self.api_key = config.get("api_key") or ""
         self.model = config.get("model") or ""
-        # 本机模型（local 模式）
-        self.local_base_url = str(config.get("local_base_url") or "").rstrip("/")
-        self.local_api_key = config.get("local_api_key") or ""
-        self.local_model = config.get("local_model") or ""
         self.timeout = int(config.get("timeout") or 180)
         self.temperature = float(config.get("temperature", 0.1))
-        self._session = local_session()
+        host = urlsplit(self.base_url).hostname
+        try:
+            private_host = bool(host and ipaddress.ip_address(host).is_private)
+        except ValueError:
+            private_host = host == "localhost" or bool(host and host.endswith(".local"))
+        self._session = local_session() if private_host else requests
 
     # ---------- 底层调用 ----------
 
     def chat(self, messages: list) -> str:
-        if self.mode == "local":
-            return self._chat_local(messages)
-        return self._chat_direct(messages)
+        if not self.base_url:
+            raise LLMError("未配置 LLM API 地址")
+        if not self.model:
+            raise LLMError("未配置模型名称")
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        body = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+        }
+        data = self._post_chat(self._session, self.base_url, headers, body,
+                               "LLM API")
+        return self._extract_text(data)
 
     def _post_chat(self, session, url: str, headers: dict, body: dict,
                    label: str):
@@ -97,42 +102,6 @@ class LLMClient:
                 err = err.get("message", str(err))
             raise LLMError(f"{label}返回错误：{err}")
         return data
-
-    def _chat_direct(self, messages: list) -> str:
-        if not self.base_url:
-            raise LLMError("未配置 LLM 地址")
-        if not self.model:
-            raise LLMError("未配置远程模型名称")
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        body = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": self.temperature,
-        }
-        data = self._post_chat(requests, self.base_url, headers, body,
-                               "LLM API")
-        return self._extract_text(data)
-
-    def _chat_local(self, messages: list) -> str:
-        if not self.local_base_url:
-            raise LLMError("未配置本机模型地址（如 http://127.0.0.1:8080/v1）")
-        if not self.local_model:
-            raise LLMError("未配置本地模型名称")
-        headers = {"Content-Type": "application/json"}
-        if self.local_api_key:
-            headers["Authorization"] = f"Bearer {self.local_api_key}"
-        body = {
-            "model": self.local_model,
-            "messages": messages,
-            "temperature": self.temperature,
-        }
-        # local_session 已关掉系统代理：本机常驻 Clash 时，
-        # 发给 127.0.0.1 的请求会被塞进代理导致 502
-        data = self._post_chat(self._session, self.local_base_url,
-                               headers, body, "本地模型")
-        return self._extract_text(data)
 
     @staticmethod
     def _extract_text(data) -> str:
