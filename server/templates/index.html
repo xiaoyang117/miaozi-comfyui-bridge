@@ -222,6 +222,10 @@
         <h3>提示词风格</h3>
         <label>自定义系统提示词（留空用默认）</label>
         <textarea id="s_custom_system_prompt" rows="9" spellcheck="false"></textarea>
+        <label for="s_positive_prompt_prefix">常驻正向内容</label>
+        <textarea id="s_positive_prompt_prefix" rows="4" spellcheck="false"
+          placeholder="masterpiece, best quality, cinematic lighting"></textarea>
+        <p class="hint">每次加在生成的正向提示词前；可填写质量、风格或其他内容，留空则不添加。避免与工作流中已有内容重复。</p>
       </div>
 
       <div class="settings-group">
@@ -937,7 +941,7 @@ const S_FIELDS = [
   'comfyui_url', 'comfy_project', 'comfy_bin', 'mcp_command',
   'workflow_path', 'prompt_placeholder', 'save_node_id',
   'width_placeholder', 'height_placeholder', 'gen_width', 'gen_height',
-  'custom_system_prompt', 'history_rounds',
+  'custom_system_prompt', 'positive_prompt_prefix', 'history_rounds',
 ];
 
 function renderSettings() {
