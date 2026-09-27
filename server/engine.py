@@ -29,8 +29,6 @@ class Engine:
         self.served = 0
         self.started_at = time.time()
         self._http = local_session()
-        # ComfyBackend 的 cfg 每次调用前都会从 settings 刷新
-        self.comfy = ComfyBackend({}, mcp=None, log=_log)
 
     # ---------- 配置映射 ----------
 
@@ -47,6 +45,9 @@ class Engine:
             "image_format": settings.get("image_format"),
             "image_quality": settings.get("image_quality"),
         }
+
+    def _backend(self) -> ComfyBackend:
+        return ComfyBackend(self._backend_cfg(), mcp=self.mcp, log=_log)
 
     # ---------- MCP 生命周期 ----------
 
@@ -105,11 +106,9 @@ class Engine:
             client.start()
             self.mcp = client
             self.mcp_error = ""
-            self.comfy.mcp = client
             _log(f"MCP 就绪（{len(client.tool_names())} 个工具）")
         except Exception as e:
             self.mcp = None
-            self.comfy.mcp = None
             self.mcp_error = str(e)
             _log(f"[warn] MCP 启动失败：{e}（自动改走 HTTP 直连）")
 
@@ -120,7 +119,6 @@ class Engine:
             except Exception:
                 pass
         self.mcp = None
-        self.comfy.mcp = None
         self.mcp_error = ""
 
     def restart(self) -> dict:
@@ -134,8 +132,7 @@ class Engine:
     def probe(self) -> dict:
         """测试 ComfyUI 连接。MCP 优先，失败回退 HTTP /system_stats。"""
         self.ensure_mcp()
-        self.comfy.cfg = self._backend_cfg()
-        result = self.comfy.probe()
+        result = self._backend().probe()
         if self.mcp_error and not result.get("ok"):
             result["body"] = (result.get("body") or "") + \
                 f"\n（MCP 状态：{self.mcp_error}）"
@@ -143,13 +140,11 @@ class Engine:
 
     def list_workflows(self, extra_dir: str = "") -> dict:
         self.ensure_mcp()
-        self.comfy.cfg = self._backend_cfg()
-        return self.comfy.list_workflows(extra_dir)
+        return self._backend().list_workflows(extra_dir)
 
     def generate(self, job: dict) -> dict:
         self.ensure_mcp()
-        self.comfy.cfg = self._backend_cfg()
-        result = self.comfy.generate(job)
+        result = self._backend().generate(job)
         self.served += 1
         return result
 
