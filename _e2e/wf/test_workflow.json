@@ -1,0 +1,6 @@
+{
+  "3": {"class_type": "KSampler", "inputs": {"seed": 1, "steps": 20}},
+  "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "out"}},
+  "20": {"class_type": "CLIPTextEncode", "inputs": {"text": "114514.1919810"}},
+  "21": {"class_type": "EmptyLatentImage", "inputs": {"width": "PH_W", "height": "PH_H"}}
+}

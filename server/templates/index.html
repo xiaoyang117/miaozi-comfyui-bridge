@@ -1,0 +1,1005 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
+<title>喵梓</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- 口令门 -->
+<div id="authGate" class="gate hidden">
+  <div class="gate-box">
+    <h2>访问口令</h2>
+    <input id="gateInput" type="password" placeholder="请输入口令" autocomplete="current-password">
+    <button onclick="submitGate()">进入</button>
+    <div id="gateError" class="gate-error hidden"></div>
+  </div>
+</div>
+
+<div class="app">
+  <!-- ===== 侧栏：会话列表 ===== -->
+  <aside id="sidebar" class="sidebar">
+    <div class="sidebar-head">
+      <span class="brand">喵梓</span>
+      <button class="btn-icon" title="收起" onclick="toggleSidebar()">×</button>
+    </div>
+    <button class="btn-new" onclick="newSession()">+ 新对话</button>
+    <div id="sessionList" class="session-list"></div>
+    <div class="sidebar-foot">
+      <span id="engineDot" class="dot dot-off"></span>
+      <span id="engineText">引擎检测中</span>
+    </div>
+  </aside>
+  <div id="sidebarMask" class="sidebar-mask hidden" onclick="closeSidebar()"></div>
+
+  <!-- ===== 主区 ===== -->
+  <main class="main">
+    <div class="topbar">
+      <button class="btn-icon btn-menu" title="对话列表" onclick="toggleSidebar()">☰</button>
+      <nav class="tabs">
+        <button class="tab active" data-tab="chat" onclick="switchTab('chat')">对话</button>
+        <button class="tab" data-tab="settings" onclick="switchTab('settings')">配置</button>
+      </nav>
+      <span id="engineBadge" class="badge badge-off">离线</span>
+    </div>
+
+    <!-- -------- 对话面板 -------- -->
+    <div id="panel-chat" class="panel active">
+      <div id="chatMessages" class="chat-messages">
+        <div class="empty-hint">
+          <p>描述你想要的画面，剩下的交给本地模型和 ComfyUI。</p>
+          <p class="dim">角色搜索开启时，会先去本地角色库查外貌特征。</p>
+        </div>
+      </div>
+
+      <div id="stepIndicator" class="step-indicator hidden">
+        <span class="step-dot"></span>
+        <span id="stepText">处理中</span>
+      </div>
+
+      <div class="chat-input-bar">
+        <div class="chat-toggle-row">
+          <label class="toggle-label">
+            <input type="checkbox" id="useSearch" checked>
+            <span class="toggle-slider"></span>
+            角色搜索
+          </label>
+          <label class="toggle-label">
+            <input type="checkbox" id="useHistory" checked>
+            <span class="toggle-slider"></span>
+            上下文
+          </label>
+          <label class="toggle-label">
+            <input type="checkbox" id="useSpecific">
+            <span class="toggle-slider"></span>
+            精细还原
+          </label>
+        </div>
+        <div class="chat-toggle-row">
+          <div class="pick">
+            <select id="chat_workflow" title="工作流"></select>
+          </div>
+          <div class="pick">
+            <select id="chat_preset" title="分辨率"></select>
+          </div>
+        </div>
+        <div class="chat-input-row">
+          <div class="textarea-wrap">
+            <textarea id="chatInput" rows="3" placeholder="输入图片描述，Enter 发送 / Shift+Enter 换行"></textarea>
+            <label class="btn-img-inline" title="上传参考图">
+              <input type="file" accept="image/*" multiple onchange="onImageSelect(event)">
+              <span>图片</span>
+            </label>
+          </div>
+          <button id="chatSendBtn" onclick="sendMessage()">发送</button>
+        </div>
+        <div id="imagePreview" class="image-preview hidden">
+          <button class="btn-remove-img" onclick="removeImage()">×</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- -------- 配置面板 -------- -->
+    <div id="panel-settings" class="panel">
+      <div class="sticky-actions">
+        <button onclick="saveSettings()" style="flex:1">保存配置</button>
+        <button class="btn-secondary" onclick="loadBootstrap()" style="flex:1">重新加载</button>
+      </div>
+
+      <div class="settings-group">
+        <h3>本机引擎</h3>
+        <div class="bridge-box">
+          <div>状态：<span id="engineState">检测中</span></div>
+          <div id="engineDetail" class="dim"></div>
+        </div>
+        <div class="row-gap">
+          <button class="btn-secondary" onclick="restartEngine()" style="flex:1">重启引擎</button>
+          <button class="btn-secondary" onclick="checkEngine()" style="flex:1">刷新状态</button>
+        </div>
+        <p class="hint">MCP 相关配置（命令、工作区、comfy 路径）改完保存后，点「重启引擎」生效。</p>
+      </div>
+
+      <div class="settings-group">
+        <h3>LLM（提示词生成）</h3>
+        <label>执行位置</label>
+        <select id="s_llm_mode">
+          <option value="local">直连本机模型（llama.cpp / Ollama / LM Studio）</option>
+          <option value="direct">直连远程 API</option>
+        </select>
+        <label>API 地址</label>
+        <input id="s_llm_base_url" placeholder="https://api.openai.com/v1">
+        <label>API Key</label>
+        <input id="s_llm_api_key" type="password" autocomplete="new-password">
+        <label>远程 API 模型名称（direct 模式用）</label>
+        <input id="s_llm_model">
+        <label>本机模型地址（local 模式用）</label>
+        <input id="s_local_llm_base_url" placeholder="http://127.0.0.1:8080/v1">
+        <label>本机模型 API Key（可选）</label>
+        <input id="s_local_llm_api_key" type="password" autocomplete="new-password">
+        <label>本机模型名称（local 模式用）</label>
+        <input id="s_local_llm_model" placeholder="llama-server 随意填，Ollama 填真实模型名">
+        <label>超时（秒）</label>
+        <input id="s_llm_timeout" type="number" min="10" max="900">
+        <button class="btn-secondary" onclick="testLLM()">测试连接</button>
+      </div>
+
+      <div class="settings-group">
+        <h3>VLM 图片识别</h3>
+        <label>API 地址（留空则关闭图片识别）</label>
+        <input id="s_vlm_base_url" placeholder="https://.../v1">
+        <label>API Key</label>
+        <input id="s_vlm_api_key" type="password" autocomplete="new-password">
+        <label>模型名称</label>
+        <input id="s_vlm_model" placeholder="gemini-2.5-flash">
+        <button class="btn-secondary" onclick="testVLM()">测试连接</button>
+      </div>
+
+      <div class="settings-group">
+        <h3>ComfyUI 与 MCP</h3>
+        <div class="check-row">
+          <label class="toggle-label" style="margin:0">
+            <input type="checkbox" id="s_mcp_enabled">
+            <span class="toggle-slider"></span>
+            启用 MCP（关闭则走 HTTP 直连）
+          </label>
+        </div>
+        <label>comfy-mcp 命令（venv 装的填绝对路径）</label>
+        <input id="s_mcp_command" placeholder="comfy-mcp 或 C:/.../Scripts/comfy-mcp.exe">
+        <label>ComfyUI 工作区目录（便携版必填）</label>
+        <input id="s_comfy_project" placeholder="H:/ComfyUI_windows_portable/ComfyUI">
+        <label>comfy 命令路径（venv 装的填绝对路径）</label>
+        <input id="s_comfy_bin" placeholder="C:/.../Scripts/comfy.exe">
+        <label>ComfyUI 地址</label>
+        <input id="s_comfyui_url" placeholder="http://127.0.0.1:8188">
+        <button class="btn-secondary" onclick="testComfy()">测试连接</button>
+        <div id="comfyInfo" class="hint"></div>
+      </div>
+
+      <div class="settings-group">
+        <h3>工作流与占位符</h3>
+        <label>当前工作流</label>
+        <input id="s_workflow_path" placeholder="/path/to/workflow.json">
+        <button class="btn-secondary" onclick="loadWorkflowList(true)">从本地刷新列表</button>
+        <label>提示词占位符</label>
+        <input id="s_prompt_placeholder" placeholder="114514.1919810">
+        <label>保存节点 ID</label>
+        <input id="s_save_node_id" placeholder="9">
+        <label>宽度占位符（可选）</label>
+        <input id="s_width_placeholder" placeholder="留空表示不替换">
+        <label>高度占位符（可选）</label>
+        <input id="s_height_placeholder" placeholder="留空表示不替换">
+        <label>默认宽 / 高</label>
+        <div class="two-col">
+          <input id="s_gen_width" type="number" min="64" max="4096">
+          <input id="s_gen_height" type="number" min="64" max="4096">
+        </div>
+        <label>分辨率预设（JSON 数组）</label>
+        <textarea id="s_resolution_presets" rows="5" spellcheck="false"></textarea>
+        <p class="hint">工作流里写上占位符（如 chang / gao）才会被替换。</p>
+      </div>
+
+      <div class="settings-group">
+        <h3>提示词风格</h3>
+        <label>自定义系统提示词（留空用默认）</label>
+        <textarea id="s_custom_system_prompt" rows="9" spellcheck="false"></textarea>
+      </div>
+
+      <div class="settings-group">
+        <h3>对话</h3>
+        <label>历史上下文轮数</label>
+        <input id="s_history_rounds" type="number" min="0" max="20">
+        <p class="hint">0 表示每次都是全新对话。轮数越多，本地小模型越慢。</p>
+      </div>
+
+      <div class="settings-group">
+        <h3>角色库</h3>
+        <div id="charDbState" class="dim">检测中</div>
+        <label>测试查询</label>
+        <input id="s_character_query" placeholder="shiroko 或 shiroko, blue_archive">
+        <button class="btn-secondary" onclick="testCharacters()">查询</button>
+        <div class="check-row">
+          <label class="toggle-label" style="margin:0">
+            <input type="checkbox" id="s_use_character_db">
+            <span class="toggle-slider"></span>
+            启用角色库检索
+          </label>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <h3>访问保护</h3>
+        <label>访问口令（留空则不校验）</label>
+        <input id="s_access_password" type="password" autocomplete="new-password"
+               placeholder="留空表示不修改">
+        <div class="row-gap">
+          <button class="btn-secondary" onclick="clearAccessPassword()" style="flex:1">清除口令</button>
+        </div>
+        <p class="hint">公网部署务必设置。修改后本页需要重新验证一次。</p>
+      </div>
+
+      <div id="settingsError" class="error hidden">
+        <pre id="settingsErrorText" class="error-content"></pre>
+        <button class="error-dismiss" onclick="hideError()">×</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div id="errorModal" class="modal-overlay hidden">
+  <div class="modal-box">
+    <div id="modalHeader" class="modal-header modal-error">出错了</div>
+    <pre id="modalErrorText" class="modal-body"></pre>
+    <button class="modal-btn" onclick="closeModal()">确定</button>
+  </div>
+</div>
+
+<div id="imageModal" class="modal-overlay hidden" onclick="closeImageModal()">
+  <div class="modal-image-box" onclick="event.stopPropagation()">
+    <img id="modalImage" class="modal-image" src="" alt="">
+    <button class="modal-close-btn" onclick="closeImageModal()">×</button>
+  </div>
+</div>
+
+<script>
+// ==================== 全局状态 ====================
+let S = {
+  settings: {},
+  engine: {},
+  sessions: [],
+  currentSession: '',
+  movie: {},
+};
+let selectedImages = [];
+let isGenerating = false;
+let accessPassword = localStorage.getItem('mz_pw') || '';
+let sendQueueHint = null;
+
+const $ = id => document.getElementById(id);
+
+// ==================== 请求封装 ====================
+async function api(path, options) {
+  const opt = Object.assign({}, options || {});
+  opt.headers = Object.assign({'Content-Type': 'application/json'}, opt.headers || {});
+  if (accessPassword) opt.headers['X-Access-Password'] = accessPassword;
+  if (opt.body && typeof opt.body !== 'string') opt.body = JSON.stringify(opt.body);
+  const r = await fetch(path, opt);
+  if (r.status === 401) {
+    const d = await r.json().catch(() => ({}));
+    if (d.need_auth) { showGate(); throw new Error('需要口令'); }
+  }
+  return r;
+}
+
+function showGate() {
+  $('authGate').classList.remove('hidden');
+  setTimeout(() => $('gateInput').focus(), 50);
+}
+async function submitGate() {
+  const pw = $('gateInput').value;
+  const r = await fetch('/api/auth', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({password: pw}),
+  });
+  if (r.ok) {
+    accessPassword = pw;
+    localStorage.setItem('mz_pw', pw);
+    $('authGate').classList.add('hidden');
+    $('gateError').classList.add('hidden');
+    loadBootstrap();
+  } else {
+    $('gateError').textContent = '口令错误，请重试';
+    $('gateError').classList.remove('hidden');
+  }
+}
+
+// ==================== 基础 UI ====================
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t =>
+    t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.panel').forEach(p =>
+    p.classList.toggle('active', p.id === 'panel-' + name));
+}
+function toggleSidebar() {
+  const open = $('sidebar').classList.toggle('open');
+  $('sidebarMask').classList.toggle('hidden', !open);
+}
+function closeSidebar() {
+  $('sidebar').classList.remove('open');
+  $('sidebarMask').classList.add('hidden');
+}
+function showError(msg) {
+  $('settingsErrorText').textContent = msg;
+  $('settingsError').classList.remove('hidden');
+}
+function hideError() { $('settingsError').classList.add('hidden'); }
+function showModal(msg, type) {
+  const h = $('modalHeader');
+  h.textContent = type === 'success' ? '完成' : '出错了';
+  h.className = 'modal-header ' + (type === 'success' ? 'modal-success' : 'modal-error');
+  $('modalErrorText').textContent = msg;
+  $('errorModal').classList.remove('hidden');
+}
+function closeModal() { $('errorModal').classList.add('hidden'); }
+function showImageModal(url) {
+  $('modalImage').src = url;
+  $('imageModal').classList.remove('hidden');
+}
+function closeImageModal() {
+  $('imageModal').classList.add('hidden');
+  $('modalImage').src = '';
+}
+
+// ==================== 加载 ====================
+async function loadBootstrap() {
+  try {
+    const r = await api('/api/bootstrap');
+    if (r.status !== 200) return;
+    const d = await r.json();
+    S.settings = d.settings || {};
+    S.engine = d.engine || {};
+    S.sessions = d.sessions || [];
+    renderSettings();
+    renderSessions();
+    renderEngine();
+    $('charDbState').textContent = d.character_db
+      ? '角色库已就绪' : '角色库未建立（运行 python character_lookup/build_db.py）';
+    await loadWorkflowList(false);
+    if (!S.currentSession && S.sessions.length) {
+      await openSession(S.sessions[0].id);
+    } else if (!S.currentSession) {
+      await newSession(false);
+    }
+  } catch (e) {
+    console.warn('bootstrap 失败', e);
+  }
+}
+
+// ==================== 会话 ====================
+function renderSessions() {
+  const box = $('sessionList');
+  box.innerHTML = '';
+  if (!S.sessions.length) {
+    box.innerHTML = '<div class="dim" style="padding:8px 4px;font-size:.8rem">还没有对话</div>';
+    return;
+  }
+  S.sessions.forEach(s => {
+    const row = document.createElement('div');
+    row.className = 'session-item' + (s.id === S.currentSession ? ' active' : '');
+    const title = document.createElement('span');
+    title.className = 'session-title';
+    title.textContent = s.title || '新对话';
+    title.onclick = () => openSession(s.id);
+    const del = document.createElement('button');
+    del.className = 'btn-del-session';
+    del.textContent = '×';
+    del.title = '删除对话';
+    del.onclick = async (e) => {
+      e.stopPropagation();
+      if (!confirm('删除这个对话？')) return;
+      await api('/api/sessions/' + s.id, {method: 'DELETE'});
+      if (S.currentSession === s.id) S.currentSession = '';
+      S.sessions = S.sessions.filter(x => x.id !== s.id);
+      renderSessions();
+      if (!S.currentSession) {
+        if (S.sessions.length) await openSession(S.sessions[0].id);
+        else await newSession(false);
+      }
+    };
+    row.appendChild(title);
+    row.appendChild(del);
+    box.appendChild(row);
+  });
+}
+
+async function newSession(switchTo = true) {
+  try {
+    const r = await api('/api/sessions', {method: 'POST', body: {title: '新对话'}});
+    const d = await r.json();
+    if (d.session) {
+      S.sessions.unshift(d.session);
+      S.currentSession = d.session.id;
+      renderSessions();
+      if (switchTo) {
+        $('chatMessages').innerHTML = '';
+        renderEmptyHint();
+        if (window.innerWidth < 900) closeSidebar();
+      }
+    }
+  } catch (e) { console.warn(e); }
+}
+
+async function openSession(sid) {
+  S.currentSession = sid;
+  renderSessions();
+  if (window.innerWidth < 900) closeSidebar();
+  try {
+    const r = await api('/api/sessions/' + sid);
+    const d = await r.json();
+    const box = $('chatMessages');
+    box.innerHTML = '';
+    if (!d.messages || !d.messages.length) renderEmptyHint();
+    else d.messages.forEach(m => renderMessage(m));
+  } catch (e) { console.warn(e); }
+}
+
+function renderEmptyHint() {
+  const box = $('chatMessages');
+  box.innerHTML = '<div class="empty-hint"><p>描述你想要的画面，剩下的交给本地模型和 ComfyUI。</p>'
+    + '<p class="dim">角色搜索开启时，会先去本地角色库查外貌特征。</p></div>';
+}
+
+// ==================== 消息渲染 ====================
+function makeCollapsible(label, contentEl, openByDefault) {
+  const wrap = document.createElement('div');
+  wrap.className = 'collapsible' + (openByDefault ? ' coll-open' : '');
+  const header = document.createElement('div');
+  header.className = 'coll-header';
+  header.textContent = label;
+  const body = document.createElement('div');
+  body.className = 'coll-body';
+  body.appendChild(contentEl);
+  header.addEventListener('click', () => wrap.classList.toggle('coll-open'));
+  wrap.appendChild(header);
+  wrap.appendChild(body);
+  return wrap;
+}
+
+function renderMessage(m) {
+  const box = $('chatMessages');
+  const hint = box.querySelector('.empty-hint');
+  if (hint) hint.remove();
+
+  const div = document.createElement('div');
+  div.className = 'chat-bubble ' + (m.role === 'user' ? 'chat-user' : 'chat-assistant');
+
+  const del = document.createElement('button');
+  del.className = 'btn-del-msg';
+  del.textContent = '×';
+  del.title = '删除此条';
+  del.onclick = async () => {
+    if (m.id) await api('/api/messages/' + m.id, {method: 'DELETE'});
+    div.remove();
+  };
+  div.appendChild(del);
+
+  if (m.role === 'user') {
+    if (m.meta && m.meta.has_image) {
+      const badge = document.createElement('div');
+      badge.className = 'chat-has-image';
+      badge.textContent = `[已上传 ${m.meta.image_count || 1} 张参考图]`;
+      div.appendChild(badge);
+    }
+    if (m.content) {
+      const p = document.createElement('div');
+      p.className = 'chat-text';
+      p.textContent = m.content;
+      div.appendChild(p);
+    }
+  } else {
+    if (m.vlm) {
+      const pre = document.createElement('pre');
+      pre.className = 'mono-block';
+      pre.textContent = m.vlm;
+      div.appendChild(makeCollapsible('图片分析', pre, false));
+    }
+    if (m.character) {
+      const pre = document.createElement('pre');
+      pre.className = 'mono-block';
+      pre.textContent = m.character;
+      div.appendChild(makeCollapsible('角色库参考', pre, false));
+    }
+    if (m.content) {
+      const pre = document.createElement('pre');
+      pre.className = 'mono-block prompt-block';
+      pre.textContent = m.content;
+      const coll = makeCollapsible('提示词', pre, true);
+      div.appendChild(coll);
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'btn-inline';
+      copyBtn.textContent = '复制提示词';
+      copyBtn.onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(m.content);
+          copyBtn.textContent = '已复制';
+        } catch (e) { copyBtn.textContent = '复制失败'; }
+        setTimeout(() => { copyBtn.textContent = '复制提示词'; }, 1800);
+      };
+      div.appendChild(copyBtn);
+    }
+    if (m.image) {
+      const wrap = document.createElement('div');
+      wrap.className = 'chat-image-wrap';
+      const img = document.createElement('img');
+      img.className = 'chat-image';
+      img.loading = 'lazy';
+      img.src = m.image;
+      img.onclick = () => showImageModal(m.image);
+      wrap.appendChild(img);
+      div.appendChild(wrap);
+
+      const bar = document.createElement('div');
+      bar.className = 'img-actions';
+      bar.appendChild(makeImgButton('放大', () => showImageModal(m.image)));
+      bar.appendChild(makeImgButton('复制图片', async (btn) => {
+        try {
+          const r = await fetch(m.image);
+          const blob = await r.blob();
+          const bmp = await createImageBitmap(blob);
+          const canvas = document.createElement('canvas');
+          canvas.width = bmp.width; canvas.height = bmp.height;
+          canvas.getContext('2d').drawImage(bmp, 0, 0);
+          bmp.close();
+          const png = await new Promise(res => canvas.toBlob(res, 'image/png'));
+          await navigator.clipboard.write([new ClipboardItem({'image/png': png})]);
+          btn.textContent = '已复制';
+        } catch (e) { btn.textContent = '复制失败'; }
+        setTimeout(() => { btn.textContent = '复制图片'; }, 1800);
+      }));
+      bar.appendChild(makeImgButton('保存', async (btn) => {
+        try {
+          const r = await fetch(m.image);
+          const blob = await r.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = (m.character || 'miaozi') + '_' + Date.now() + '.png';
+          document.body.appendChild(a); a.click(); a.remove();
+          URL.revokeObjectURL(url);
+          btn.textContent = '已保存';
+        } catch (e) { btn.textContent = '保存失败'; }
+        setTimeout(() => { btn.textContent = '保存'; }, 1800);
+      }));
+      div.appendChild(bar);
+    }
+  }
+
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+function makeImgButton(label, handler) {
+  const b = document.createElement('button');
+  b.className = 'btn-inline';
+  b.textContent = label;
+  b.onclick = () => handler(b);
+  return b;
+}
+
+// ==================== 图片选择 ====================
+function onImageSelect(event) {
+  const files = Array.from(event.target.files || []);
+  addFiles(files);
+  event.target.value = '';
+}
+function addFiles(files) {
+  files = files.filter(f => f.type.startsWith('image/'));
+  if (!files.length) return;
+  const preview = $('imagePreview');
+  preview.classList.remove('hidden');
+  files.forEach(file => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      selectedImages.push(e.target.result);
+      const thumb = document.createElement('img');
+      thumb.src = e.target.result;
+      preview.appendChild(thumb);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+function removeImage() {
+  selectedImages = [];
+  const preview = $('imagePreview');
+  preview.innerHTML = '<button class="btn-remove-img" onclick="removeImage()">×</button>';
+  preview.classList.add('hidden');
+}
+
+// ==================== 工作流 / 分辨率 ====================
+async function loadWorkflowList(notify) {
+  const sel = $('chat_workflow');
+  sel.innerHTML = '<option>加载中…</option>';
+  try {
+    const r = await api('/api/workflows');
+    const d = await r.json();
+    sel.innerHTML = '';
+    const list = (d && d.workflows) || [];
+    if (!list.length) {
+      sel.innerHTML = '<option value="">无工作流文件</option>';
+    } else {
+      list.forEach(wf => {
+        const o = document.createElement('option');
+        o.value = wf.path; o.textContent = wf.name;
+        sel.appendChild(o);
+      });
+      const cur = S.settings.workflow_path;
+      if (cur && list.some(w => w.path === cur)) sel.value = cur;
+      else if (list.length) selectWorkflowPath(list[0].path, false);
+    }
+    if (notify) showModal(`读取到 ${list.length} 个工作流\n${d.dir || ''}`, 'success');
+  } catch (e) {
+    sel.innerHTML = '<option value="">加载失败</option>';
+  }
+}
+function selectWorkflowPath(path, syncInput) {
+  const sel = $('chat_workflow');
+  if ([...sel.options].some(o => o.value === path)) sel.value = path;
+  if (syncInput) $('s_workflow_path').value = path;
+}
+function renderPresets() {
+  const sel = $('chat_preset');
+  sel.innerHTML = '';
+  const presets = S.settings.resolution_presets || [];
+  presets.forEach((p, i) => {
+    const o = document.createElement('option');
+    o.value = i;
+    o.textContent = p.label || (p.width + '×' + p.height);
+    sel.appendChild(o);
+  });
+}
+
+// ==================== 发送 ====================
+function setStep(key) {
+  const map = {vlm: '识别图片…', search: '检索角色特征…', llm: '生成提示词…', comfyui: 'ComfyUI 出图中…'};
+  $('stepText').textContent = map[key] || key;
+  $('stepIndicator').classList.remove('hidden', 'step-done');
+}
+function hideStep() { $('stepIndicator').classList.add('hidden'); }
+
+async function sendMessage() {
+  if (isGenerating) return;
+  const input = $('chatInput');
+  const text = input.value.trim();
+  if (!text) return;
+
+  if (!S.currentSession) await newSession(false);
+
+  isGenerating = true;
+  const btn = $('chatSendBtn');
+  btn.disabled = true;
+  btn.textContent = '生成中';
+  input.value = '';
+
+  const images = selectedImages.slice();
+  const hadImage = images.length > 0;
+  removeImage();
+
+  // 立刻插入本地气泡，等服务端回执后再刷新
+  const temp = {role: 'user', content: text, meta: {has_image: hadImage, image_count: images.length}};
+  renderMessage(temp);
+
+  try {
+    const body = {
+      prompt: text,
+      session_id: S.currentSession,
+      use_search: $('useSearch').checked,
+      use_history: $('useHistory').checked,
+      specific: $('useSpecific').checked,
+      workflow_path: $('chat_workflow').value || S.settings.workflow_path,
+      preset_index: parseInt($('chat_preset').value, 10),
+      images: images,
+    };
+
+    let response = null;
+    for (let attempt = 1; attempt <= 90; attempt++) {
+      response = await api('/api/generate', {method: 'POST', body: body});
+      const ct = response.headers.get('content-type') || '';
+      if (ct.includes('text/event-stream')) break;
+      const d = await response.json().catch(() => ({}));
+      if (d.queue) {
+        $('stepText').textContent = `排队中（第 ${attempt} 次）`;
+        $('stepIndicator').classList.remove('hidden');
+        await new Promise(r => setTimeout(r, 2000));
+        response = null;
+        continue;
+      }
+      throw new Error(d.error || '请求失败');
+    }
+    if (!response) throw new Error('排队超时，请稍后重试');
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '', result = null;
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream: true});
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        let evt;
+        try { evt = JSON.parse(line.slice(6)); } catch (e) { continue; }
+        if (evt.step === 'done') result = evt;
+        else if (evt.step === 'error') throw new Error(evt.error);
+        else setStep(evt.step);
+      }
+    }
+
+    if (!result) throw new Error('未收到完成事件');
+    hideStep();
+    // 重新拉一次服务端历史，保证 id 正确（可删除）
+    await openSession(result.session_id || S.currentSession);
+    refreshSessions();
+  } catch (e) {
+    hideStep();
+    document.querySelectorAll('#chatMessages .chat-bubble').forEach((el, i, arr) => {
+      if (i === arr.length - 1 && el.classList.contains('chat-user')) el.remove();
+    });
+    renderMessage({role: 'assistant', content: '错误：' + (e.message || '生成失败')});
+    showModal('错误：' + (e.message || '生成失败'));
+  } finally {
+    isGenerating = false;
+    btn.disabled = false;
+    btn.textContent = '发送';
+  }
+}
+
+async function refreshSessions() {
+  try {
+    const r = await api('/api/sessions');
+    const d = await r.json();
+    S.sessions = d.sessions || [];
+    renderSessions();
+  } catch (e) { /* 忽略 */ }
+}
+
+// ==================== 引擎状态 ====================
+const ENGINE_STATE_TEXT = {mcp: 'MCP 引擎', http: 'HTTP 直连', offline: '离线'};
+function renderEngine() {
+  const e = S.engine || {};
+  const state = e.state || 'offline';
+  const online = state !== 'offline';
+  $('engineDot').className = 'dot ' + (online ? 'dot-on' : 'dot-off');
+  $('engineText').textContent = online
+    ? `${ENGINE_STATE_TEXT[state]} · 已出图 ${e.served || 0}`
+    : 'ComfyUI 未连接';
+  const badge = $('engineBadge');
+  badge.className = 'badge ' + (online ? 'badge-on' : 'badge-off');
+  badge.textContent = online ? ENGINE_STATE_TEXT[state] : '离线';
+  $('engineState').textContent = online ? ENGINE_STATE_TEXT[state] : '离线';
+  const parts = [];
+  if (e.mcp_alive) parts.push(`MCP 在线（${e.tools_count || 0} 工具）`);
+  else if (e.mcp_enabled === false) parts.push('MCP 已按配置关闭');
+  else if (e.mcp_error) parts.push('MCP 未就绪：' + e.mcp_error);
+  if (e.local_llm_ok) parts.push(`本机模型正常${e.local_llm_model ? '（' + e.local_llm_model + '）' : ''}`);
+  else if (e.local_llm_error) parts.push('本机模型异常：' + e.local_llm_error);
+  if (e.comfyui_url) parts.push(String(e.comfyui_url));
+  if (e.uptime !== undefined) parts.push(`已运行 ${Math.floor(e.uptime / 60)} 分钟`);
+  $('engineDetail').textContent = parts.join(' · ') || '本机引擎未就绪，生图会失败。';
+}
+async function checkEngine() {
+  try {
+    const r = await api('/api/engine/status');
+    const d = await r.json();
+    S.engine = d.engine || {};
+    renderEngine();
+    const ok = S.engine.state !== 'offline';
+    showModal(ok
+      ? '引擎在线（' + ENGINE_STATE_TEXT[S.engine.state] + '）'
+      : 'ComfyUI 未连接', ok ? 'success' : 'error');
+  } catch (e) { showError('刷新失败：' + e.message); }
+}
+async function restartEngine() {
+  try {
+    const r = await api('/api/engine/restart', {method: 'POST'});
+    const d = await r.json();
+    S.engine = d.engine || {};
+    renderEngine();
+    const ok = S.engine.state !== 'offline';
+    showModal(ok ? '引擎已重启，MCP 就绪' : '引擎已重启，但 ComfyUI 未连上',
+      ok ? 'success' : 'error');
+  } catch (e) { showError('重启失败：' + e.message); }
+}
+
+// ==================== 配置 ====================
+const S_FIELDS = [
+  'llm_mode', 'llm_base_url', 'llm_api_key', 'llm_model',
+  'local_llm_base_url', 'local_llm_api_key', 'local_llm_model',
+  'llm_timeout', 'vlm_base_url', 'vlm_api_key', 'vlm_model',
+  'comfyui_url', 'comfy_project', 'comfy_bin', 'mcp_command',
+  'workflow_path', 'prompt_placeholder', 'save_node_id',
+  'width_placeholder', 'height_placeholder', 'gen_width', 'gen_height',
+  'custom_system_prompt', 'history_rounds',
+];
+
+function renderSettings() {
+  const s = S.settings || {};
+  S_FIELDS.forEach(k => {
+    const el = $('s_' + k);
+    if (!el) return;
+    el.value = s[k] === undefined || s[k] === null ? '' : s[k];
+  });
+  $('s_use_character_db').checked = s.use_character_db !== false;
+  $('s_mcp_enabled').checked = s.mcp_enabled !== false;
+  $('s_mcp_enabled').checked = s.mcp_enabled !== false;
+  $('s_resolution_presets').value = JSON.stringify(s.resolution_presets || [], null, 2);
+  // 口令不下发，永远留空；留空即不修改
+  $('s_access_password').value = '';
+  renderPresets();
+}
+
+function collectSettings() {
+  const body = {};
+  S_FIELDS.forEach(k => {
+    const el = $('s_' + k);
+    if (!el) return;
+    body[k] = el.value;
+  });
+  body.use_character_db = $('s_use_character_db').checked;
+  body.mcp_enabled = $('s_mcp_enabled').checked;
+  // 只有填了新口令才提交，避免误清空
+  const pw = $('s_access_password').value;
+  if (pw) body.access_password = pw;
+  const raw = $('s_resolution_presets').value.trim();
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) body.resolution_presets = parsed;
+    } catch (e) {
+      throw new Error('分辨率预设不是合法 JSON：' + e.message);
+    }
+  }
+  return body;
+}
+
+async function clearAccessPassword() {
+  if (!confirm('清除口令后任何人都能访问，确定？')) return;
+  try {
+    const r = await api('/api/settings', {method: 'POST', body: {access_password: ''}});
+    const d = await r.json();
+    if (d.success) {
+      S.settings = d.settings;
+      accessPassword = '';
+      localStorage.removeItem('mz_pw');
+      showModal('口令已清除', 'success');
+    }
+  } catch (e) { showError('清除失败：' + e.message); }
+}
+
+async function saveSettings() {
+  hideError();
+  let body;
+  try { body = collectSettings(); } catch (e) { showError(e.message); return; }
+  try {
+    const r = await api('/api/settings', {method: 'POST', body: body});
+    const d = await r.json();
+    if (!d.success) { showError(d.error || '保存失败'); return; }
+    S.settings = d.settings;
+    // 刚设置了新口令，记下来免得立刻被踢
+    if (body.access_password) {
+      accessPassword = body.access_password;
+      localStorage.setItem('mz_pw', accessPassword);
+    }
+    renderPresets();
+    showModal('配置已保存', 'success');
+  } catch (e) { showError('保存失败：' + e.message); }
+}
+
+async function testLLM() {
+  hideError();
+  try {
+    const body = collectSettings();
+    $('settingsErrorText').textContent = '测试中…';
+    $('settingsError').classList.remove('hidden');
+    const r = await api('/api/test/llm', {method: 'POST', body: body});
+    const d = await r.json();
+    if (d.success) {
+      showError(`LLM 正常（模式：${d.mode === 'local' ? '本机模型' : '远程 API'}）\n返回：${d.output}`);
+    } else {
+      showError('LLM 失败：' + (d.error || ''));
+    }
+  } catch (e) { showError('测试失败：' + e.message); }
+}
+
+async function testVLM() {
+  hideError();
+  try {
+    const r = await api('/api/test/vlm', {method: 'POST', body: collectSettings()});
+    const d = await r.json();
+    showError(d.success
+      ? `VLM 正常（HTTP ${d.status}）\n${d.body}`
+      : `VLM 失败（HTTP ${d.status}）\n${d.body}`);
+  } catch (e) { showError('测试失败：' + e.message); }
+}
+
+async function testComfy() {
+  hideError();
+  $('settingsErrorText').textContent = '正在测试 ComfyUI…';
+  $('settingsError').classList.remove('hidden');
+  try {
+    const r = await api('/api/test/comfyui', {method: 'POST', body: {}});
+    const d = await r.json();
+    if (d.success) {
+      $('comfyInfo').textContent = 'ComfyUI 正常';
+      showError('ComfyUI 连接正常\n' + (d.body || ''));
+    } else {
+      $('comfyInfo').textContent = '';
+      showError('ComfyUI 失败：' + (d.error || ''));
+    }
+  } catch (e) { showError('测试失败：' + e.message); }
+}
+
+async function testCharacters() {
+  hideError();
+  const query = $('s_character_query').value.trim();
+  try {
+    const r = await api('/api/test/characters', {method: 'POST', body: {query}});
+    const d = await r.json();
+    showError(d.success ? '查询成功\n' + d.result : '查询失败：' + (d.error || ''));
+  } catch (e) { showError('测试失败：' + e.message); }
+}
+
+// ==================== 事件绑定 ====================
+$('chatInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey && !isGenerating) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+// 手机软键盘弹起时，保证输入框可见、聊天区贴底
+const chatBox = $('chatMessages');
+$('chatInput').addEventListener('focus', () => {
+  setTimeout(() => chatBox.scrollTop = chatBox.scrollHeight, 300);
+});
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', () => {
+    chatBox.scrollTop = chatBox.scrollHeight;
+  });
+}
+$('gateInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') submitGate();
+});
+
+const chatInput = $('chatInput');
+chatInput.addEventListener('dragover', e => { e.preventDefault(); chatInput.classList.add('drag'); });
+chatInput.addEventListener('dragleave', () => chatInput.classList.remove('drag'));
+chatInput.addEventListener('drop', e => {
+  e.preventDefault();
+  chatInput.classList.remove('drag');
+  addFiles(Array.from(e.dataTransfer.files || []));
+});
+
+$('chat_workflow').addEventListener('change', function () {
+  $('s_workflow_path').value = this.value;
+});
+
+// 主动刷新引擎状态，让「离线/在线」能自己变
+setInterval(async () => {
+  if (document.hidden) return;
+  try {
+    const r = await api('/api/engine/status');
+    const d = await r.json();
+    S.engine = d.engine || {};
+    renderEngine();
+  } catch (e) { /* 静默 */ }
+}, 20000);
+
+// 启动：需要口令时 api() 会弹出口令门
+loadBootstrap();
+</script>
+</body>
+</html>

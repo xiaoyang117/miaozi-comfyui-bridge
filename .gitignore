@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# 运行时数据，别提交
+server/data/
+server/outputs/
+server/character_lookup/characters.db
+server/character_lookup/danbooru_character.csv
+
+.venv/
+venv/
+.vscode/
+.idea/
+.DS_Store
+
+# 测试产物
+_e2e/server.log
+_e2e/llm.log
+_e2e/data/
+_e2e/live_out.png
+_e2e/live_ph_out.png
