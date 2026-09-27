@@ -22,10 +22,15 @@
   <!-- ===== 侧栏：会话列表 ===== -->
   <aside id="sidebar" class="sidebar">
     <div class="sidebar-head">
-      <span class="brand">喵梓</span>
-      <button class="btn-icon" title="收起" onclick="toggleSidebar()">×</button>
+      <div class="brand-lockup"><span class="brand-mark">喵</span><div><strong class="brand">喵梓</strong><small>本地创作空间</small></div></div>
+      <button class="btn-icon sidebar-close" title="收起" aria-label="收起对话列表" onclick="closeSidebar()">×</button>
     </div>
-    <button class="btn-new" onclick="newSession()">+ 新对话</button>
+    <button class="btn-new" onclick="newSession()"><span>＋</span> 开始新创作</button>
+    <label class="session-search-wrap">
+      <span class="visually-hidden">搜索对话</span>
+      <input id="sessionSearch" type="search" placeholder="搜索对话…" oninput="renderSessions()">
+    </label>
+    <div class="sidebar-label">最近的创作</div>
     <div id="sessionList" class="session-list"></div>
     <div class="sidebar-foot">
       <span id="engineDot" class="dot dot-off"></span>
@@ -37,7 +42,8 @@
   <!-- ===== 主区 ===== -->
   <main class="main">
     <div class="topbar">
-      <button class="btn-icon btn-menu" title="对话列表" onclick="toggleSidebar()">☰</button>
+      <button class="btn-icon btn-menu" title="对话列表" aria-label="打开对话列表" onclick="toggleSidebar()">☰</button>
+      <div class="topbar-title">创作工作台 <span> / 把灵感变成画面</span></div>
       <nav class="tabs">
         <button class="tab active" data-tab="chat" onclick="switchTab('chat')">对话</button>
         <button class="tab" data-tab="settings" onclick="switchTab('settings')">配置</button>
@@ -47,19 +53,30 @@
 
     <!-- -------- 对话面板 -------- -->
     <div id="panel-chat" class="panel active">
-      <div id="chatMessages" class="chat-messages">
+      <template id="emptyTemplate">
         <div class="empty-hint">
-          <p>描述你想要的画面，剩下的交给本地模型和 ComfyUI。</p>
-          <p class="dim">角色搜索开启时，会先去本地角色库查外貌特征。</p>
+          <div class="hero-symbol" aria-hidden="true">✦</div>
+          <div class="eyebrow">YOUR IDEAS, MADE VISIBLE</div>
+          <h1>今天想创作什么？</h1>
+          <p>写下脑海里的画面，让本地模型与 ComfyUI 帮你完成。</p>
+          <div class="starter-label">从一个灵感开始</div>
+          <div class="starter-grid">
+            <button class="starter-card" data-prompt="雨后的东京街头，霓虹灯倒映在湿润的路面上，电影感夜景" onclick="useStarterPrompt(this)"><span>◈</span><strong>电影场景</strong><small>雨夜街头与霓虹倒影</small><em>↗</em></button>
+            <button class="starter-card" data-prompt="一只橘猫坐在洒满阳光的窗台上，温暖的绘本插画风格" onclick="useStarterPrompt(this)"><span>✳</span><strong>温暖插画</strong><small>阳光窗台上的小猫</small><em>↗</em></button>
+            <button class="starter-card" data-prompt="云海之上的浮空城市，古老的石桥连接岛屿，奇幻概念艺术" onclick="useStarterPrompt(this)"><span>✧</span><strong>奇幻世界</strong><small>云海与浮空城市</small><em>↗</em></button>
+          </div>
+          <div class="empty-footnote">所有创作都在你的设备上完成</div>
         </div>
-      </div>
+      </template>
+      <div id="chatMessages" class="chat-messages"></div>
 
-      <div id="stepIndicator" class="step-indicator hidden">
+      <div id="stepIndicator" class="step-indicator hidden" role="status" aria-live="polite">
         <span class="step-dot"></span>
         <span id="stepText">处理中</span>
       </div>
 
       <div class="chat-input-bar">
+        <div class="composer-label">创作描述 <span>用自然语言描述你的想法</span></div>
         <div class="chat-toggle-row">
           <label class="toggle-label">
             <input type="checkbox" id="useSearch" checked>
@@ -79,22 +96,23 @@
         </div>
         <div class="chat-toggle-row">
           <div class="pick">
-            <select id="chat_workflow" title="工作流"></select>
+            <select id="chat_workflow" title="工作流" aria-label="工作流"></select>
           </div>
           <div class="pick">
-            <select id="chat_preset" title="分辨率"></select>
+            <select id="chat_preset" title="分辨率" aria-label="分辨率"></select>
           </div>
         </div>
         <div class="chat-input-row">
           <div class="textarea-wrap">
-            <textarea id="chatInput" rows="3" placeholder="输入图片描述，Enter 发送 / Shift+Enter 换行"></textarea>
+            <textarea id="chatInput" rows="3" placeholder="例如：雨后的城市街头，暖色灯光，电影质感…" aria-label="图片描述"></textarea>
             <label class="btn-img-inline" title="上传参考图">
               <input type="file" accept="image/*" multiple onchange="onImageSelect(event)">
               <span>图片</span>
             </label>
           </div>
-          <button id="chatSendBtn" onclick="sendMessage()">发送</button>
+          <button id="chatSendBtn" onclick="sendMessage()">生成图片 <span aria-hidden="true">↗</span></button>
         </div>
+        <div class="composer-footnote">Enter 发送 · Shift + Enter 换行</div>
         <div id="imagePreview" class="image-preview hidden">
           <button class="btn-remove-img" onclick="removeImage()">×</button>
         </div>
@@ -103,6 +121,7 @@
 
     <!-- -------- 配置面板 -------- -->
     <div id="panel-settings" class="panel">
+      <div class="settings-intro"><span class="eyebrow">PREFERENCES</span><h1>创作配置</h1><p>连接你的本地工具，调整每次创作的方式。</p></div>
       <div class="sticky-actions">
         <button onclick="saveSettings()" style="flex:1">保存配置</button>
         <button class="btn-secondary" onclick="loadBootstrap()" style="flex:1">重新加载</button>
@@ -379,18 +398,40 @@ async function loadBootstrap() {
 // ==================== 会话 ====================
 function renderSessions() {
   const box = $('sessionList');
-  box.innerHTML = '';
-  if (!S.sessions.length) {
-    box.innerHTML = '<div class="dim" style="padding:8px 4px;font-size:.8rem">还没有对话</div>';
+  box.replaceChildren();
+  const query = $('sessionSearch').value.trim().toLocaleLowerCase();
+  const sessions = S.sessions.filter(s => (s.title || '新对话').toLocaleLowerCase().includes(query));
+  if (!sessions.length) {
+    const empty = document.createElement('div');
+    empty.className = 'session-empty';
+    empty.textContent = query ? '没有找到匹配的对话' : '还没有对话，开始创作吧';
+    box.appendChild(empty);
     return;
   }
-  S.sessions.forEach(s => {
+  sessions.forEach(s => {
     const row = document.createElement('div');
     row.className = 'session-item' + (s.id === S.currentSession ? ' active' : '');
-    const title = document.createElement('span');
+    const title = document.createElement('button');
     title.className = 'session-title';
     title.textContent = s.title || '新对话';
     title.onclick = () => openSession(s.id);
+    const rename = document.createElement('button');
+    rename.className = 'btn-rename-session';
+    rename.textContent = '✎';
+    rename.title = '重命名对话';
+    rename.setAttribute('aria-label', '重命名 ' + (s.title || '新对话'));
+    rename.onclick = async () => {
+      const name = prompt('对话名称', s.title || '新对话');
+      if (name === null || !name.trim() || name.trim() === s.title) return;
+      try {
+        const r = await api('/api/sessions/' + s.id, {
+          method: 'PATCH', body: {title: name.trim()},
+        });
+        if (!r.ok) throw new Error('重命名失败');
+        s.title = name.trim().slice(0, 80);
+        renderSessions();
+      } catch (e) { showModal(e.message); }
+    };
     const del = document.createElement('button');
     del.className = 'btn-del-session';
     del.textContent = '×';
@@ -408,6 +449,7 @@ function renderSessions() {
       }
     };
     row.appendChild(title);
+    row.appendChild(rename);
     row.appendChild(del);
     box.appendChild(row);
   });
@@ -422,6 +464,7 @@ async function newSession(switchTo = true) {
       S.currentSession = d.session.id;
       renderSessions();
       if (switchTo) {
+        switchTab('chat');
         $('chatMessages').innerHTML = '';
         renderEmptyHint();
         if (window.innerWidth < 900) closeSidebar();
@@ -432,6 +475,7 @@ async function newSession(switchTo = true) {
 
 async function openSession(sid) {
   S.currentSession = sid;
+  switchTab('chat');
   renderSessions();
   if (window.innerWidth < 900) closeSidebar();
   try {
@@ -446,8 +490,12 @@ async function openSession(sid) {
 
 function renderEmptyHint() {
   const box = $('chatMessages');
-  box.innerHTML = '<div class="empty-hint"><p>描述你想要的画面，剩下的交给本地模型和 ComfyUI。</p>'
-    + '<p class="dim">角色搜索开启时，会先去本地角色库查外貌特征。</p></div>';
+  box.appendChild($('emptyTemplate').content.cloneNode(true));
+}
+
+function useStarterPrompt(button) {
+  $('chatInput').value = button.dataset.prompt;
+  $('chatInput').focus();
 }
 
 // ==================== 消息渲染 ====================
@@ -496,6 +544,14 @@ function renderMessage(m) {
       p.className = 'chat-text';
       p.textContent = m.content;
       div.appendChild(p);
+      if (m.id) {
+        const reuse = makeImgButton('再次编辑', () => {
+          $('chatInput').value = m.content;
+          $('chatInput').focus();
+        });
+        reuse.classList.add('btn-reuse');
+        div.appendChild(reuse);
+      }
     }
   } else {
     if (m.vlm) {
@@ -753,7 +809,7 @@ async function sendMessage() {
   } finally {
     isGenerating = false;
     btn.disabled = false;
-    btn.textContent = '发送';
+    btn.innerHTML = '生成图片 <span aria-hidden="true">↗</span>';
   }
 }
 
@@ -999,6 +1055,7 @@ setInterval(async () => {
 }, 20000);
 
 // 启动：需要口令时 api() 会弹出口令门
+renderEmptyHint();
 loadBootstrap();
 </script>
 </body>
