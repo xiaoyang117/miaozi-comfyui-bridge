@@ -11,7 +11,7 @@ MCP 相关配置改完后点「重启引擎」重建连接。
 import threading
 import time
 
-from backends import ComfyBackend, LocalLLM, local_session
+from backends import ComfyBackend, local_session
 from mcp_client import MCPClient
 from settings import settings
 
@@ -28,7 +28,6 @@ class Engine:
         self._lock = threading.RLock()
         self.served = 0
         self.started_at = time.time()
-        self._llm_health = {"ok": False, "checked_at": 0.0, "models": []}
         self._http = local_session()
         # ComfyBackend 的 cfg 每次调用前都会从 settings 刷新
         self.comfy = ComfyBackend({}, mcp=None, log=_log)
@@ -47,13 +46,6 @@ class Engine:
             "image_max_dim": settings.get("image_max_dim"),
             "image_format": settings.get("image_format"),
             "image_quality": settings.get("image_quality"),
-        }
-
-    def _llm_cfg(self) -> dict:
-        return {
-            "base_url": settings.get("local_llm_base_url"),
-            "api_key": settings.get("local_llm_api_key"),
-            "model": settings.get("local_llm_model"),
         }
 
     # ---------- MCP 生命周期 ----------
@@ -161,24 +153,6 @@ class Engine:
         self.served += 1
         return result
 
-    def llm_chat(self, payload: dict, timeout: float = 300) -> dict:
-        llm = LocalLLM(self._llm_cfg(), log=_log)
-        return llm.chat(payload, timeout=timeout)
-
-    def llm_health(self, force: bool = False) -> dict:
-        """本地模型健康状态，结果缓存 30 秒，别每次都打 Ollama。"""
-        now = time.time()
-        with self._lock:
-            if not force and now - self._llm_health["checked_at"] < 30:
-                return dict(self._llm_health)
-        result = LocalLLM(self._llm_cfg(), log=_log).health()
-        with self._lock:
-            self._llm_health = {"ok": result.get("ok", False),
-                                "checked_at": now,
-                                "models": result.get("models") or [],
-                                "error": result.get("error", "")}
-            return dict(self._llm_health)
-
     def comfy_http_alive(self, timeout: float = 4.0) -> bool:
         url = str(settings.get("comfyui_url") or "").rstrip("/")
         if not url:
@@ -200,7 +174,6 @@ class Engine:
             state = "http"
         else:
             state = "offline"
-        llm = self.llm_health()
         return {
             "state": state,                # mcp | http | offline
             "mcp_alive": mcp_alive,
@@ -209,9 +182,6 @@ class Engine:
             "tools_count": len(self.mcp.tool_names()) if mcp_alive else 0,
             "comfyui_url": settings.get("comfyui_url"),
             "comfy_project": settings.get("comfy_project"),
-            "local_llm_ok": bool(llm.get("ok")),
-            "local_llm_model": settings.get("local_llm_model"),
-            "local_llm_error": llm.get("error", ""),
             "served": self.served,
             "uptime": int(time.time() - self.started_at),
         }

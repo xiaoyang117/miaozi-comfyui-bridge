@@ -74,13 +74,9 @@ def _guard():
 
 def _make_llm(**overrides) -> LLMClient:
     cfg = {
-        "mode": settings.llm_mode,
         "base_url": settings.get("llm_base_url"),
         "api_key": settings.get("llm_api_key"),
         "model": settings.get("llm_model"),
-        "local_base_url": settings.get("local_llm_base_url"),
-        "local_api_key": settings.get("local_llm_api_key"),
-        "local_model": settings.get("local_llm_model"),
         "timeout": settings.llm_timeout,
     }
     cfg.update({k: v for k, v in overrides.items() if v is not None})
@@ -88,20 +84,10 @@ def _make_llm(**overrides) -> LLMClient:
 
 
 def _llm_config_for_test(data: dict) -> LLMClient:
-    mode = data.get("llm_mode") or settings.llm_mode
-    if mode == "bridge":
-        mode = "local"
     return LLMClient({
-        "mode": mode,
-        "base_url": data.get("llm_base_url") or settings.get("llm_base_url"),
-        "api_key": data.get("llm_api_key") or settings.get("llm_api_key"),
-        "model": data.get("llm_model") or settings.get("llm_model"),
-        "local_base_url": (data.get("local_llm_base_url")
-                           or settings.get("local_llm_base_url")),
-        "local_api_key": (data.get("local_llm_api_key")
-                          or settings.get("local_llm_api_key")),
-        "local_model": (data.get("local_llm_model")
-                        or settings.get("local_llm_model")),
+        "base_url": data.get("llm_base_url", settings.get("llm_base_url")),
+        "api_key": data.get("llm_api_key", settings.get("llm_api_key")),
+        "model": data.get("llm_model", settings.get("llm_model")),
         "timeout": min(settings.llm_timeout, 120),
     })
 
@@ -293,9 +279,7 @@ def test_llm():
         out = client.call(
             "你是一个测试助手。只回复：连接正常",
             "ping")
-        label = "本机模型" if client.mode == "local" else "远程 API"
-        return jsonify({"success": True, "output": out[:500],
-                        "mode": client.mode, "mode_label": label})
+        return jsonify({"success": True, "output": out[:500]})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 

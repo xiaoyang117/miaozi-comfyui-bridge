@@ -20,18 +20,10 @@ DEFAULT_SETTINGS = {
     "access_password": "",
 
     # ---- LLM ----
-    # local = 直连本机模型（Ollama / LM Studio）；direct = 调远程 API
-    "llm_mode": "direct",
+    # 本机和远程都使用 OpenAI 兼容接口
     "llm_base_url": "https://api.openai.com/v1",
     "llm_api_key": "",
     "llm_model": "gpt-4o-mini",
-    # local 模式下要请求的本地服务与模型名
-    # 默认 llama.cpp 的 llama-server（OpenAI 兼容，默认端口 8080）；
-    # Ollama / LM Studio 也能用，把地址改掉即可
-    "local_llm_base_url": "http://127.0.0.1:8080/v1",
-    "local_llm_api_key": "",
-    # llama-server 忽略模型名，但接口要求非空；Ollama 用户请填真实模型名
-    "local_llm_model": "local-model",
     # 单次 LLM 请求超时（秒），本地小模型慢，给宽一点
     "llm_timeout": 180,
 
@@ -122,6 +114,14 @@ class Settings:
                     for key, value in loaded.items():
                         if key in DEFAULT_SETTINGS:
                             self._data[key] = value
+                    if loaded.get("llm_mode") in ("local", "bridge"):
+                        for key, old_key, fallback in (
+                            ("llm_base_url", "local_llm_base_url",
+                             "http://127.0.0.1:8080/v1"),
+                            ("llm_api_key", "local_llm_api_key", ""),
+                            ("llm_model", "local_llm_model", "local-model"),
+                        ):
+                            self._data[key] = loaded.get(old_key) or fallback
         except Exception:
             # 配置坏了不应该让服务起不来
             pass
@@ -160,13 +160,6 @@ class Settings:
     @property
     def access_password(self) -> str:
         return str(self.get("access_password") or "")
-
-    @property
-    def llm_mode(self) -> str:
-        mode = str(self.get("llm_mode") or "direct")
-        if mode == "bridge":
-            mode = "local"        # 兼容历史配置
-        return mode if mode in ("direct", "local") else "direct"
 
     def _int(self, key: str, fallback: int) -> int:
         try:

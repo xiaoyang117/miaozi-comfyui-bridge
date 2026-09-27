@@ -142,25 +142,12 @@
 
       <div class="settings-group">
         <h3>LLM（提示词生成）</h3>
-        <label>执行位置</label>
-        <select id="s_llm_mode">
-          <option value="local">直连本机模型（llama.cpp / Ollama / LM Studio）</option>
-          <option value="direct">直连远程 API</option>
-        </select>
-        <label>API 地址</label>
-        <input id="s_llm_base_url" type="text" placeholder="https://api.openai.com/v1">
+        <label for="s_llm_base_url">API 地址</label>
+        <input id="s_llm_base_url" type="text" placeholder="https://api.openai.com/v1 或 http://127.0.0.1:8080/v1">
         <label>API Key</label>
-        <input id="s_llm_api_key" type="password" autocomplete="new-password">
-        <label>远程 API 模型名称（direct 模式用）</label>
-        <input id="s_llm_model" type="text">
-        <label>本机模型地址（local 模式用）</label>
-        <input id="s_local_llm_base_url" type="text" placeholder="http://127.0.0.1:8080/v1">
-        <label>本机模型 API Key（可选）</label>
-        <input id="s_local_llm_api_key" type="password" autocomplete="new-password">
-        <label>本机模型名称（local 模式用）</label>
-        <input id="s_local_llm_model" type="text" placeholder="llama-server 随意填，Ollama 填真实模型名">
-        <label>超时（秒）</label>
-        <input id="s_llm_timeout" type="number" min="10" max="900">
+        <input id="s_llm_api_key" type="password" autocomplete="new-password" placeholder="本机模型通常可留空">
+        <label for="s_llm_model">模型名称</label>
+        <input id="s_llm_model" type="text" placeholder="本机模型填实际名称；llama-server 可填 local-model">
         <button class="btn-secondary" onclick="testLLM()">测试连接</button>
       </div>
 
@@ -903,8 +890,6 @@ function renderEngine() {
   if (e.mcp_alive) parts.push(`MCP 在线（${e.tools_count || 0} 工具）`);
   else if (e.mcp_enabled === false) parts.push('MCP 已按配置关闭');
   else if (e.mcp_error) parts.push('MCP 未就绪：' + e.mcp_error);
-  if (e.local_llm_ok) parts.push(`本机模型正常${e.local_llm_model ? '（' + e.local_llm_model + '）' : ''}`);
-  else if (e.local_llm_error) parts.push('本机模型异常：' + e.local_llm_error);
   if (e.comfyui_url) parts.push(String(e.comfyui_url));
   if (e.uptime !== undefined) parts.push(`已运行 ${Math.floor(e.uptime / 60)} 分钟`);
   $('engineDetail').textContent = parts.join(' · ') || '本机引擎未就绪，生图会失败。';
@@ -935,9 +920,8 @@ async function restartEngine() {
 
 // ==================== 配置 ====================
 const S_FIELDS = [
-  'llm_mode', 'llm_base_url', 'llm_api_key', 'llm_model',
-  'local_llm_base_url', 'local_llm_api_key', 'local_llm_model',
-  'llm_timeout', 'vlm_base_url', 'vlm_api_key', 'vlm_model',
+  'llm_base_url', 'llm_api_key', 'llm_model',
+  'vlm_base_url', 'vlm_api_key', 'vlm_model',
   'comfyui_url', 'comfy_project', 'comfy_bin', 'mcp_command',
   'workflow_path', 'prompt_placeholder', 'save_node_id',
   'width_placeholder', 'height_placeholder', 'gen_width', 'gen_height',
@@ -1026,7 +1010,7 @@ async function testLLM() {
     const r = await api('/api/test/llm', {method: 'POST', body: body});
     const d = await r.json();
     if (d.success) {
-      showError(`LLM 正常（模式：${d.mode === 'local' ? '本机模型' : '远程 API'}）\n返回：${d.output}`);
+      showError(`LLM 连接正常\n返回：${d.output}`);
     } else {
       showError('LLM 失败：' + (d.error || ''));
     }
