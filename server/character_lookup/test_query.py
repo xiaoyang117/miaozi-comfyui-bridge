@@ -46,6 +46,23 @@ class CharacterQueryTest(unittest.TestCase):
         self.assertEqual(len(alternatives), 2)
         self.assertEqual(lookup("shiroko", db_path=self.db), "")
 
+    def test_extended_limit_keeps_lesser_known_same_name_candidates(self):
+        with sqlite3.connect(self.db) as conn:
+            for index in range(5):
+                row = parse_row({
+                    "character": f"shiroko_(series_{index})",
+                    "copyright": f"series_{index}",
+                    "trigger": f"Shiroko, Series {index}",
+                    "count": str(index),
+                    "core_tags": "",
+                })
+                conn.execute(
+                    f"INSERT INTO characters ({','.join(COLS)}) "
+                    f"VALUES ({','.join('?' * len(COLS))})",
+                    [row[column] for column in COLS])
+        self.assertEqual(len(direct_candidates("shiroko", self.db)), 5)
+        self.assertEqual(len(direct_candidates("shiroko", self.db, limit=20)), 7)
+
     def test_wrong_series_and_unrelated_tags_do_not_match(self):
         self.assertEqual(find_candidates("shiroko, missing", db_path=self.db), [])
         self.assertEqual(find_candidates("white hair", db_path=self.db), [])

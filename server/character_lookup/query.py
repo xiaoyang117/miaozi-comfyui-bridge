@@ -84,10 +84,11 @@ def find_candidates(query: str, limit: int = 5,
     return [_clean(row) for row in rows]
 
 
-def direct_candidates(description: str, db_path: str = "") -> list[dict]:
+def direct_candidates(description: str, db_path: str = "",
+                      limit: int = 5) -> list[dict]:
     text = (description or "").strip()
     if re.fullmatch(r"[a-zA-Z0-9_ ()'\-]+(?:,\s*[a-zA-Z0-9_ ()'\-]+)?", text):
-        return find_candidates(text, db_path=db_path)
+        return find_candidates(text, limit=limit, db_path=db_path)
     return []
 
 

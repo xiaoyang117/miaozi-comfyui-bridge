@@ -349,12 +349,12 @@ def test_characters():
 
 
 def _resolve_character(prompt: str) -> dict:
-    candidates = direct_candidates(prompt)
+    candidates = direct_candidates(prompt, limit=20)
     if not candidates:
         tags = _make_llm().extract_tags(prompt)
         if not tags or tags.strip().lower() in ("无", "none", "no character"):
             return {"status": "not_found", "message": "未识别到明确的角色名", "candidates": []}
-        candidates = find_candidates(tags)
+        candidates = find_candidates(tags, limit=20)
     if not candidates:
         return {"status": "not_found", "message": "角色库未找到匹配角色", "candidates": []}
     public = [{"character": c["character"], "name": c["name"],
