@@ -37,6 +37,29 @@ class CharacterFlowTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json["status"], "disabled")
 
+    def test_selected_character_is_verified_without_another_llm_lookup(self):
+        character = {"character": "shiroko", "name": "Shiroko",
+                     "copyright_name": "Blue Archive"}
+        with (patch("app.settings.get", return_value=True),
+              patch("app.char_db_built", return_value=True),
+              patch("app._resolve_workflow_path", return_value="workflow.json"),
+              patch("app.store.ensure_session", return_value="session"),
+              patch("app._make_llm"),
+              patch("app.get_character", return_value=character) as get_character,
+              patch("app.format_character", return_value="role context"),
+              patch("app._resolve_character") as resolve):
+            stream = _run_generation({
+                "prompt": "Shiroko", "character_checked": True,
+                "character_id": "shiroko",
+            })
+            self.assertEqual(json.loads(next(stream).removeprefix("data: "))["step"],
+                             "search")
+            event = json.loads(next(stream).removeprefix("data: "))
+            stream.close()
+        self.assertIn("Shiroko", event["message"])
+        get_character.assert_called_once_with("shiroko")
+        resolve.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
