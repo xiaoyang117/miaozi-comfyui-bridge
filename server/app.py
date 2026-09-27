@@ -18,8 +18,9 @@ from flask import (Flask, Response, jsonify, render_template, request,
                    send_from_directory)
 from werkzeug.exceptions import HTTPException
 
-from character_lookup import is_built as char_db_built
-from character_lookup import lookup as char_lookup
+from character_lookup import (direct_candidates, find_candidates,
+                              format_character, get_character,
+                              is_built as char_db_built, lookup as char_lookup)
 from engine import engine
 from llm import LLMError
 from llm.client import LLMClient
@@ -338,8 +339,47 @@ def test_characters():
     result = char_lookup(query)
     if result:
         return jsonify({"success": True, "result": result[:800]})
+    candidates = find_candidates(query)
+    if candidates:
+        names = " / ".join(f"{c['name']} ({c['copyright_name']})"
+                           for c in candidates)
+        return jsonify({"success": False, "error": f"找到多个角色，请加上作品名：{names}"})
     return jsonify({"success": False,
                     "error": f"未找到「{query}」，角色名请用英文或罗马音"})
+
+
+def _resolve_character(prompt: str) -> dict:
+    candidates = direct_candidates(prompt, limit=20)
+    if not candidates:
+        tags = _make_llm().extract_tags(prompt)
+        if not tags or tags.strip().lower() in ("无", "none", "no character"):
+            return {"status": "not_found", "message": "未识别到明确的角色名", "candidates": []}
+        candidates = find_candidates(tags, limit=20)
+    if not candidates:
+        return {"status": "not_found", "message": "角色库未找到匹配角色", "candidates": []}
+    public = [{"character": c["character"], "name": c["name"],
+               "copyright": c["copyright_name"]} for c in candidates]
+    if len(candidates) > 1:
+        return {"status": "ambiguous", "message": "找到多个同名角色，请选择作品",
+                "candidates": public}
+    return {"status": "matched", "message": f"已匹配：{public[0]['name']}（{public[0]['copyright']}）",
+            "candidates": public}
+
+
+@app.route("/api/characters/resolve", methods=["POST"])
+def api_resolve_character():
+    data = request.get_json(silent=True) or {}
+    if not settings.get("use_character_db", True) or not data.get("use_search", True):
+        return jsonify({"status": "disabled", "message": "角色库检索已关闭", "candidates": []})
+    if not char_db_built():
+        return jsonify({"status": "unavailable", "message": "角色库未建立", "candidates": []})
+    prompt = str(data.get("prompt") or "").strip()
+    if not prompt:
+        return jsonify({"error": "请输入图片描述"}), 400
+    try:
+        return jsonify(_resolve_character(prompt))
+    except Exception as e:
+        return jsonify({"error": f"角色检索失败：{e}"}), 500
 
 
 @app.route("/api/test/comfyui", methods=["POST"])
@@ -403,7 +443,7 @@ def _run_generation(payload: dict):
         return
 
     session_id = store.ensure_session(payload.get("session_id") or "")
-    use_character = bool(payload.get("use_search", True))
+    use_character = bool(payload.get("use_search", True)) and settings.get("use_character_db", True)
     specific = bool(payload.get("specific", False))
     use_history = bool(payload.get("use_history", True))
     workflow_path = _resolve_workflow_path(payload.get("workflow_path"))
@@ -439,24 +479,35 @@ def _run_generation(payload: dict):
 
     # ---------- 1. 角色库检索 ----------
     character_info = ""
-    character_name = ""
-    if use_character and char_db_built():
+    character_status = "角色库检索已关闭"
+    if use_character and not char_db_built():
+        character_status = "角色库未建立，已跳过检索"
+    elif use_character:
         yield _sse({"step": "search"})
         try:
-            tags = client.extract_tags(user_input)
-            if tags:
-                character_info = char_lookup(tags)
-                character_name = tags
-                if not character_info:
-                    # 只拿角色名再试一次（作品名可能拼错）
-                    first = tags.split(",")[0].strip()
-                    if first and first != tags:
-                        character_info = char_lookup(first)
-                        if character_info:
-                            character_name = first
+            selected = payload.get("character_id") or ""
+            if payload.get("character_checked") is True:
+                character = get_character(selected) if isinstance(selected, str) else None
+                if character:
+                    character_status = f"已匹配：{character['name']}（{character['copyright_name']}）"
+                else:
+                    character_status = {
+                        "not_found": "未识别到角色或角色库中没有匹配项",
+                        "ambiguous": "多个候选角色，未选择",
+                        "cancelled": "已跳过角色选择",
+                        "error": "角色检索失败，已跳过",
+                    }.get(payload.get("character_reason"), "未找到可用的角色特征")
+            else:
+                resolved = _resolve_character(user_input)
+                character_status = resolved["message"]
+                candidates = resolved["candidates"]
+                character = (get_character(candidates[0]["character"])
+                             if resolved["status"] == "matched" else None)
+            if character:
+                character_info = format_character(character)
         except Exception as e:
-            # 角色库只是增强，失败不该中断生图
-            print(f"[character lookup] {e}")
+            character_status = f"角色检索失败：{e}"
+    yield _sse({"step": "character", "message": character_status})
 
     # ---------- 2. 生成提示词 ----------
     yield _sse({"step": "llm"})
@@ -512,7 +563,8 @@ def _run_generation(payload: dict):
     store.add_message(session_id, "assistant", content=prompt,
                       image=image_url, character=character_info,
                       meta={"width": width, "height": height,
-                            "elapsed": result.get("elapsed")})
+                            "elapsed": result.get("elapsed"),
+                            "character_status": character_status})
 
     yield _sse({"step": "done", "image": image_url, "prompt": prompt,
                 "character": character_info, "vlm": vlm_text,

@@ -82,6 +82,21 @@ python app.py
 3. 工作流路径留空会自动用项目 `workflows/` 目录里第一个 json
 4. 点保存。MCP 配置有改动的话，再点「本机引擎」里的**重启引擎**
 
+### 角色特征库（可选）
+
+默认读取 `server/character_lookup/characters.db`。这个数据库不随源码分发；
+如果已有建好的 `characters.db`，直接放在该位置即可。如果只有
+`danbooru_character.csv`，放到同目录，在项目根目录运行：
+
+```bash
+python server/character_lookup/build_db.py --skip-download
+```
+
+没有 CSV 时，运行 `python server/character_lookup/build_db.py` 会下载数据并建库。
+如要将数据库放在别处，可在启动服务前设置环境变量 `CHARACTER_DB` 为数据库的绝对路径。
+配置页会显示角色库是否就绪。关闭「启用角色库检索」后生成时不会查询角色库；
+遇到同名的不同作品角色，会提示选择，取消则直接生成提示词。
+
 **便携版用户的坑**：`comfy_project` 不填的话，comfy-cli 会用它自己的默认空目录
 （`C:\Users\你\Documents\comfy\ComfyUI`），表现为模型列表是空的、
 自定义节点认不到。填你的真实工作区，比如
