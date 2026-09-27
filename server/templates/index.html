@@ -235,6 +235,7 @@
       <div class="settings-group">
         <h3>角色库</h3>
         <div id="charDbState" class="dim">检测中</div>
+        <p class="hint">数据库放在 server/character_lookup/characters.db；只有 CSV 时在项目根目录运行 python server/character_lookup/build_db.py --skip-download。</p>
         <label>测试查询</label>
         <input id="s_character_query" placeholder="shiroko 或 shiroko, blue_archive">
         <button class="btn-secondary" onclick="testCharacters()">查询</button>
@@ -555,6 +556,12 @@ function renderMessage(m) {
       }
     }
   } else {
+    if (m.meta && m.meta.character_status) {
+      const state = document.createElement('div');
+      state.className = 'dim';
+      state.textContent = m.meta.character_status;
+      div.appendChild(state);
+    }
     if (m.vlm) {
       const pre = document.createElement('pre');
       pre.className = 'mono-block';
@@ -758,6 +765,38 @@ async function sendMessage() {
       images: images,
     };
 
+    if (body.use_search) {
+      setStep('search');
+      try {
+        const resolvedResponse = await api('/api/characters/resolve', {
+          method: 'POST', body: {prompt: text, use_search: true},
+        });
+        const resolved = await resolvedResponse.json();
+        if (!resolvedResponse.ok) throw new Error(resolved.error || '角色检索失败');
+        body.character_checked = true;
+        if (resolved.status === 'matched') {
+          body.character_id = resolved.candidates[0].character;
+        } else if (resolved.status === 'ambiguous') {
+          const candidates = resolved.candidates;
+          const choices = candidates.map((item, i) =>
+            `${i + 1}. ${item.name}（${item.copyright}）`).join('\n');
+          let selected;
+          do {
+            selected = window.prompt(`找到多个角色，请输入序号：\n${choices}\n取消则跳过角色特征`);
+          } while (selected !== null &&
+                   (!Number.isInteger(Number(selected)) || Number(selected) < 1 ||
+                    Number(selected) > candidates.length));
+          if (selected !== null) body.character_id = candidates[Number(selected) - 1].character;
+          else body.character_reason = 'cancelled';
+        } else {
+          body.character_reason = resolved.status;
+        }
+      } catch (e) {
+        body.character_checked = true;
+        body.character_reason = 'error';
+      }
+    }
+
     let response = null;
     for (let attempt = 1; attempt <= 90; attempt++) {
       response = await api('/api/generate', {method: 'POST', body: body});
@@ -791,7 +830,10 @@ async function sendMessage() {
         try { evt = JSON.parse(line.slice(6)); } catch (e) { continue; }
         if (evt.step === 'done') result = evt;
         else if (evt.step === 'error') throw new Error(evt.error);
-        else setStep(evt.step);
+        else if (evt.step === 'character') {
+          $('stepText').textContent = evt.message;
+          $('stepIndicator').classList.remove('hidden');
+        } else setStep(evt.step);
       }
     }
 
