@@ -74,6 +74,7 @@ DEFAULT_SETTINGS = {
         {"label": "1152×896", "width": 1152, "height": 896},
         {"label": "1024×1024", "width": 1024, "height": 1024},
     ],
+    "workflow_controls": {},
 
     # ---- 提示词风格 ----
     "custom_system_prompt": "",
