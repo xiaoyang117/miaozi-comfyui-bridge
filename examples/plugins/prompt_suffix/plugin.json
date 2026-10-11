@@ -1,0 +1,13 @@
+{
+  "api_version": 1,
+  "id": "prompt_suffix",
+  "name": "提示词追加示例",
+  "version": "1.0.0",
+  "description": "在每次新创作的正向提示词后追加内容；再次生成会复用原提示词。",
+  "hooks": ["after_prompt"],
+  "api": true,
+  "ui": "panel.js",
+  "default_config": {
+    "suffix": "cinematic lighting"
+  }
+}

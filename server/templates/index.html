@@ -47,6 +47,7 @@
       <nav class="tabs">
         <button class="tab active" data-tab="chat" onclick="switchTab('chat')">对话</button>
         <button class="tab" data-tab="settings" onclick="switchTab('settings')">配置</button>
+        <button class="tab" data-tab="plugins" onclick="switchTab('plugins')">插件</button>
       </nav>
       <span id="engineBadge" class="badge badge-off">离线</span>
     </div>
@@ -292,6 +293,17 @@
         <button class="error-dismiss" onclick="hideError()">×</button>
       </div>
     </div>
+
+    <div id="panel-plugins" class="panel">
+      <div class="settings-intro"><span class="eyebrow">EXTENSIONS</span><h1>插件管理</h1>
+        <p>把可信插件文件夹放入 server/data/plugins，点击「重新扫描」即可看到。默认关闭，启用后立即用于后续创作。</p>
+      </div>
+      <div class="row-gap plugin-actions">
+        <button class="btn-secondary" onclick="reloadPlugins()">重新扫描并载入代码</button>
+      </div>
+      <div id="pluginError" class="error hidden"></div>
+      <div id="pluginList"></div>
+    </div>
   </main>
 </div>
 
@@ -371,6 +383,7 @@ function switchTab(name) {
     t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.panel').forEach(p =>
     p.classList.toggle('active', p.id === 'panel-' + name));
+  if (name === 'plugins') loadPlugins();
 }
 function toggleSidebar() {
   const open = $('sidebar').classList.toggle('open');
@@ -393,6 +406,136 @@ function showModal(msg, type) {
   $('errorModal').classList.remove('hidden');
 }
 function closeModal() { $('errorModal').classList.add('hidden'); }
+
+function pluginError(message) {
+  $('pluginError').textContent = message;
+  $('pluginError').classList.toggle('hidden', !message);
+}
+
+async function loadPlugins() {
+  try {
+    const response = await api('/api/plugins');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '读取插件失败');
+    pluginError('');
+    renderPlugins(data.plugins);
+  } catch (e) { pluginError(e.message); }
+}
+
+async function reloadPlugins() {
+  try {
+    const response = await api('/api/plugins/reload', {method: 'POST'});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '重新扫描失败');
+    pluginError('');
+    renderPlugins(data.plugins);
+  } catch (e) { pluginError(e.message); }
+}
+
+function renderPlugins(items) {
+  const list = $('pluginList');
+  list.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement('p');
+    empty.className = 'dim';
+    empty.textContent = '还没有插件。将包含 plugin.json 和 main.py 的插件文件夹放入 server/data/plugins。';
+    list.appendChild(empty);
+  }
+  items.forEach(plugin => {
+    const card = document.createElement('div');
+    card.className = 'settings-group plugin-card';
+    const title = document.createElement('h3');
+    title.textContent = `${plugin.name} · v${plugin.version || '?'}`;
+    card.appendChild(title);
+    const description = document.createElement('p');
+    description.className = 'hint';
+    description.textContent = plugin.description || plugin.id;
+    card.appendChild(description);
+    const hooks = document.createElement('p');
+    hooks.className = 'dim';
+    hooks.textContent = '扩展点：' + (plugin.hooks.join('、') || '无');
+    card.appendChild(hooks);
+    if (plugin.error) {
+      const error = document.createElement('p');
+      error.className = 'plugin-error';
+      error.textContent = plugin.error;
+      card.appendChild(error);
+    }
+    const label = document.createElement('label');
+    label.className = 'toggle-label';
+    const enabled = document.createElement('input');
+    enabled.type = 'checkbox';
+    enabled.checked = plugin.enabled;
+    enabled.disabled = !!plugin.error && !plugin.enabled;
+    const slider = document.createElement('span');
+    slider.className = 'toggle-slider';
+    label.append(enabled, slider, document.createTextNode('启用插件'));
+    card.appendChild(label);
+    const orderLabel = document.createElement('label');
+    orderLabel.textContent = '执行顺序（小的先运行）';
+    card.appendChild(orderLabel);
+    const order = document.createElement('input');
+    order.type = 'number';
+    order.min = -1000;
+    order.max = 1000;
+    order.value = plugin.order;
+    card.appendChild(order);
+    const configLabel = document.createElement('label');
+    configLabel.textContent = '插件配置（JSON 对象）';
+    card.appendChild(configLabel);
+    const config = document.createElement('textarea');
+    config.rows = 5;
+    config.spellcheck = false;
+    config.value = JSON.stringify(plugin.config, null, 2);
+    card.appendChild(config);
+    const save = document.createElement('button');
+    save.className = 'btn-secondary';
+    save.textContent = '保存插件设置';
+    save.onclick = async () => {
+      try {
+        const parsed = JSON.parse(config.value);
+        if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object')
+          throw new Error('插件配置需要是 JSON 对象');
+        const response = await api('/api/plugins/' + plugin.id, {
+          method: 'PUT',
+          body: {enabled: enabled.checked, order: Number(order.value), config: parsed},
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || '保存失败');
+        pluginError('');
+        renderPlugins(data.plugins);
+      } catch (e) { pluginError(e.message); }
+    };
+    card.appendChild(save);
+    if (plugin.ui && plugin.enabled && !plugin.error) {
+      const open = document.createElement('button');
+      open.className = 'btn-secondary';
+      open.textContent = '打开插件面板';
+      open.onclick = async () => {
+        try {
+          const response = await api(`/api/plugins/${plugin.id}/assets/${plugin.ui}`);
+          if (!response.ok) throw new Error('无法读取插件面板');
+          const code = await response.text();
+          const script = document.createElement('script');
+          script.textContent = code;
+          document.body.appendChild(script);
+          script.remove();
+          const panel = document.createElement('div');
+          panel.className = 'plugin-panel';
+          open.after(panel);
+          const render = window.miaoziPluginPanels && window.miaoziPluginPanels[plugin.id];
+          if (typeof render !== 'function') throw new Error('插件未提供面板渲染函数');
+          render(panel, api, plugin.config);
+          open.remove();
+          pluginError('');
+        } catch (e) { pluginError(e.message); }
+      };
+      card.appendChild(open);
+    }
+    list.appendChild(card);
+  });
+}
+
 function showImageModal(url) {
   $('modalImage').src = url;
   $('imageModal').classList.remove('hidden');

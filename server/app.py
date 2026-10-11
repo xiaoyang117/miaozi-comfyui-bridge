@@ -26,6 +26,7 @@ from engine import engine
 from llm import LLMError
 from llm.client import LLMClient, parse_generated_prompt
 from llm.prompts import build_history_text
+from plugins import PluginError, plugins
 from settings import settings
 from store import store
 from vlm import VLMError, describe_images
@@ -218,6 +219,45 @@ def api_settings():
         return jsonify({"error": "无效的配置数据"}), 400
     settings.update(data)
     return jsonify({"success": True, "settings": _public_settings()})
+
+
+@app.route("/api/plugins")
+def api_plugins():
+    return jsonify({"success": True, "plugins": plugins.list_plugins()})
+
+
+@app.route("/api/plugins/<plugin_id>", methods=["PUT"])
+def api_plugin_configure(plugin_id):
+    try:
+        plugins.configure(plugin_id, request.get_json(silent=True))
+        return jsonify({"success": True, "plugins": plugins.list_plugins()})
+    except PluginError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": f"无法启用插件：{exc}"}), 400
+
+
+@app.route("/api/plugins/reload", methods=["POST"])
+def api_plugins_reload():
+    return jsonify({"success": True, "plugins": plugins.reload()})
+
+
+@app.route("/api/plugins/<plugin_id>/call/<action>", methods=["POST"])
+def api_plugin_call(plugin_id, action):
+    try:
+        result = plugins.call_api(plugin_id, action, request.get_json(silent=True))
+        return jsonify(result)
+    except PluginError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/plugins/<plugin_id>/assets/<name>")
+def api_plugin_asset(plugin_id, name):
+    try:
+        return send_from_directory(plugins.directory / plugin_id / "assets",
+                                   plugins.asset(plugin_id, name).name)
+    except PluginError as exc:
+        return jsonify({"error": str(exc)}), 404
 
 
 # ---------------------------------------------------------------- 引擎
@@ -663,13 +703,21 @@ def _run_generation(payload: dict):
     if use_history and settings.history_rounds > 0:
         history_text = build_history_text(
             store.context_pairs(session_id, settings.history_rounds))
+    prompt_data = plugins.run("before_prompt", {
+        "user_input": user_input_full,
+        "history_text": history_text,
+        "character_info": character_info,
+        "specific": specific,
+        "custom_system": settings.get("custom_system_prompt") or "",
+        "workflow_path": workflow_path,
+    })
     try:
         generated_prompt = client.generate_prompt(
-            user_input_full,
-            history_text=history_text,
-            context=character_info,
-            specific=specific,
-            custom_system=settings.get("custom_system_prompt") or "",
+            prompt_data["user_input"],
+            history_text=prompt_data["history_text"],
+            context=prompt_data["character_info"],
+            specific=prompt_data["specific"],
+            custom_system=prompt_data["custom_system"],
             include_description=True,
         )
         if isinstance(generated_prompt, str):
@@ -688,12 +736,18 @@ def _run_generation(payload: dict):
     if positive_prefix:
         prompt = f"{positive_prefix}, {prompt}"
 
+    output = plugins.run("after_prompt", {
+        "prompt": prompt, "description": description,
+        "workflow_path": workflow_path,
+    })
+    prompt, description = output["prompt"], output["description"]
     resize = payload.get("preset_index") != -1
     generated = yield from _generate_image(prompt, workflow_path, width, height,
-                                           controls=controls, resize=resize)
+                                           controls=controls, resize=resize,
+                                           description=description)
     if generated is None:
         return
-    result, image_url = generated
+    result, image_url, description = generated
     width, height = result.get("base_size") or (width, height)
 
     # ---------- 4. 落库 ----------
@@ -756,10 +810,10 @@ def _run_regeneration(payload: dict):
     resize = meta.get("resize", True)
     generated = yield from _generate_image(
         prompt, workflow_path, width, height, randomize_seed=True,
-        controls=controls, resize=resize)
+        controls=controls, resize=resize, description=description)
     if generated is None:
         return
-    result, image_url = generated
+    result, image_url, description = generated
     width, height = result.get("base_size") or (width, height)
     store.add_message(session_id, "assistant", content=prompt,
                       image=image_url, character=source["character"],
@@ -788,7 +842,7 @@ def _workflow_controls(workflow_path: str, payload: dict) -> dict:
 
 def _generate_image(prompt: str, workflow_path: str, width: int, height: int,
                     randomize_seed: bool = False, controls: dict = None,
-                    resize: bool = True):
+                    resize: bool = True, description: str = ""):
     yield _sse({"step": "comfyui"})
     try:
         replacements = settings.build_replacements(prompt, width, height)
@@ -809,13 +863,21 @@ def _generate_image(prompt: str, workflow_path: str, width: int, height: int,
     except Exception as e:
         yield _sse({"step": "error", "error": f"ComfyUI 执行失败：{e}"})
         return
+    if result.get("image"):
+        output = plugins.run("after_generate", {
+            "image": result["image"], "description": description,
+            "prompt": prompt, "workflow_path": workflow_path,
+            "is_regeneration": randomize_seed,
+        })
+        result["image"] = output["image"]
+        description = output["description"]
     image_url = _save_data_url(result["image"], prefix="gen_") if result.get("image") else ""
     if not image_url:
         yield _sse({"step": "error",
                     "error": result.get("error")
                     or "ComfyUI 没有返回图片，请检查工作流的保存节点 ID"})
         return
-    return result, image_url
+    return result, image_url, description
 
 
 # ---------------------------------------------------------------- 错误兜底
