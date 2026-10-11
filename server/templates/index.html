@@ -119,6 +119,26 @@
           <p id="loraModelStatus" class="hint"></p>
           <button type="button" class="btn-secondary" onclick="saveWorkflowControls()">保存此工作流参数</button>
         </details>
+        <details class="workflow-controls">
+          <summary>二次采样专区</summary>
+          <p class="hint">先生成底图，再放大并补充细节。默认保持工作流原设置。</p>
+          <p id="secondPassStatus" class="hint">选择工作流后读取二采节点</p>
+          <label for="secondPassMode">二采方式</label>
+          <select id="secondPassMode" onchange="updateSecondPassMode()" disabled>
+            <option value="original">保持工作流原设置</option>
+            <option value="existing">调整已有二采</option>
+            <option value="add">新增二采</option>
+          </select>
+          <div id="secondPassNodes" class="hidden"></div>
+          <div id="secondPassAdd" class="hidden">
+            <label for="secondPassSource">使用哪轮底图</label>
+            <select id="secondPassSource" onchange="renderSecondPassAddition()"></select>
+            <div id="secondPassAddFields" class="sampling-fields"></div>
+            <p class="hint">继承底图的模型、LoRA 和提示词，在 VAE 解码前加入 latent 放大与二采。</p>
+          </div>
+          <p class="hint">降噪越高，画面变化通常越大；放大倍数会增加显存和耗时。采样器与调度器请填写 ComfyUI 可用的名称。</p>
+          <button type="button" class="btn-secondary" onclick="saveWorkflowControls()">保存此工作流参数</button>
+        </details>
         <div class="chat-input-row">
           <div class="textarea-wrap">
             <textarea id="chatInput" rows="3" placeholder="例如：雨后的城市街头，暖色灯光，电影质感…" aria-label="图片描述"></textarea>
@@ -796,6 +816,140 @@ function addLoraRow(item = {}) {
   row.appendChild(remove);
   $('extraLoras').appendChild(row);
 }
+const samplingLabels = {
+  steps: '采样步数', cfg: 'CFG 提示词引导', denoise: '降噪强度',
+  sampler_name: '采样器名称', scheduler: '调度器名称',
+  start_at_step: '开始步数', end_at_step: '结束步数',
+  add_noise: '加入噪声', return_with_leftover_noise: '保留剩余噪声',
+  width: '放大宽度（0 自动）', height: '放大高度（0 自动）',
+  scale_by: '放大倍数', upscale_method: '放大方法', crop: '裁剪方式',
+};
+function makeSamplingField(key, value, classType = '') {
+  const wrapper = document.createElement('label');
+  wrapper.textContent = samplingLabels[key] || key;
+  const rule = workflowDescription.second_pass.numeric_rules[key];
+  const choices = {
+    add_noise: ['enable', 'disable'], return_with_leftover_noise: ['disable', 'enable'],
+    crop: ['disabled', 'center'],
+    upscale_method: classType.startsWith('Latent')
+      ? ['nearest-exact', 'bilinear', 'area', 'bicubic', 'bislerp']
+      : ['nearest-exact', 'bilinear', 'area', 'bicubic', 'lanczos'],
+  }[key];
+  const input = document.createElement(choices ? 'select' : 'input');
+  if (choices) {
+    const labels = {enable: '启用', disable: '关闭', disabled: '不裁剪', center: '居中裁剪'};
+    [...new Set([...choices, String(value)])].forEach(option =>
+      input.add(new Option(labels[option] || option, option)));
+  } else {
+    input.type = rule ? 'number' : 'text';
+    if (rule) {
+      input.min = rule.min;
+      input.max = rule.max;
+      input.step = rule.integer ? '1' : 'any';
+    }
+  }
+  input.dataset.secondField = key;
+  input.value = value;
+  wrapper.appendChild(input);
+  return wrapper;
+}
+function renderSecondPassAddition(controls = {}) {
+  if (!workflowDescription) return;
+  const target = workflowDescription.second_pass.add_targets.find(
+    node => node.id === $('secondPassSource').value);
+  const fields = $('secondPassAddFields');
+  fields.replaceChildren();
+  if (!target) return;
+  const defaults = {steps: 20, denoise: 0.35, scale_by: 1.5, upscale_method: 'bislerp'};
+  ['cfg', 'sampler_name', 'scheduler'].forEach(key => {
+    if (target.editable_fields.includes(key)) defaults[key] = target.parameters[key];
+  });
+  Object.entries(defaults).forEach(([key, value]) =>
+    fields.appendChild(makeSamplingField(key, controls.parameters?.[key] ?? value, 'LatentUpscaleBy')));
+}
+function updateSecondPassMode() {
+  const mode = $('secondPassMode').value;
+  $('secondPassNodes').classList.toggle('hidden', mode !== 'existing');
+  $('secondPassAdd').classList.toggle('hidden', mode !== 'add');
+}
+function renderSecondPassControls(data, controls) {
+  const details = data.second_pass;
+  const saved = controls.second_pass || {};
+  const mode = $('secondPassMode');
+  mode.disabled = false;
+  mode.querySelector('[value="existing"]').disabled = !details.samplers.length;
+  mode.querySelector('[value="add"]').disabled = !details.add_targets.length;
+  mode.value = saved.mode || 'original';
+  if (!mode.value) mode.value = 'original';
+  $('secondPassStatus').textContent = details.samplers.length
+    ? `已识别 ${details.samplers.length} 个后续采样节点、${details.upscalers.length} 个放大节点；初采参数保持原样。`
+    : details.add_targets.length ? '工作流只有初采，可选择新增二采。'
+    : '未识别到已有二采；自动新增需要单轮 KSampler 直接连接 VAE 解码。';
+  if (mode.selectedOptions[0].disabled)
+    $('secondPassStatus').textContent += ' 已保存的二采方式不适用，请重新选择。';
+  const nodes = $('secondPassNodes');
+  nodes.replaceChildren();
+  [...details.samplers, ...details.upscalers].forEach(node => {
+    const row = document.createElement('fieldset');
+    row.className = 'sampling-node';
+    row.dataset.nodeId = node.id;
+    const title = document.createElement('legend');
+    title.textContent = `${node.title} #${node.id} · ${node.class_type}`;
+    const fields = document.createElement('div');
+    fields.className = 'sampling-fields';
+    node.editable_fields.forEach(key =>
+      fields.appendChild(makeSamplingField(key, saved.nodes?.[node.id]?.[key]
+        ?? node.parameters[key], node.class_type)));
+    row.append(title, fields);
+    if (!node.editable_fields.length
+        || node.editable_fields.length < Object.keys(node.parameters).length) {
+      const hint = document.createElement('p');
+      hint.className = 'hint';
+      hint.textContent = '部分参数由上游节点控制，请在 ComfyUI 中调整对应来源。';
+      row.appendChild(hint);
+    }
+    nodes.appendChild(row);
+  });
+  const source = $('secondPassSource');
+  source.replaceChildren(...details.add_targets.map(node =>
+    new Option(`${node.title} #${node.id}`, node.id)));
+  source.value = saved.source_sampler_id || details.add_targets[0]?.id || '';
+  if (!source.value && details.add_targets.length) source.selectedIndex = 0;
+  renderSecondPassAddition(saved);
+  updateSecondPassMode();
+}
+function readSamplingFields(container, validate) {
+  const values = {};
+  container.querySelectorAll('[data-second-field]').forEach(input => {
+    const key = input.dataset.secondField;
+    const value = input.value.trim();
+    const rule = workflowDescription.second_pass.numeric_rules[key];
+    if (validate) {
+      if (!value) throw new Error(`二采：${samplingLabels[key]}不能为空`);
+      if (rule && (!Number.isFinite(Number(value))
+          || Number(value) < rule.min || Number(value) > rule.max
+          || (rule.integer && !Number.isInteger(Number(value))))) {
+        throw new Error(`二采：${samplingLabels[key]}应为 ${rule.min} 到 ${rule.max} 之间的${rule.integer ? '整数' : '数字'}`);
+      }
+    }
+    values[key] = value;
+  });
+  return values;
+}
+function currentSecondPassControls() {
+  const mode = $('secondPassMode').value;
+  const details = workflowDescription.second_pass;
+  if (mode === 'existing' && !details.samplers.length)
+    throw new Error('此工作流没有已有二采，请重新选择二采方式');
+  if (mode === 'add' && !details.add_targets.length)
+    throw new Error('此工作流无法直接新增二采，请重新选择二采方式');
+  const nodes = {};
+  document.querySelectorAll('#secondPassNodes .sampling-node').forEach(row => {
+    nodes[row.dataset.nodeId] = readSamplingFields(row, mode === 'existing');
+  });
+  return {mode, nodes, source_sampler_id: $('secondPassSource').value,
+          parameters: readSamplingFields($('secondPassAddFields'), mode === 'add')};
+}
 function currentWorkflowControls() {
   const path = $('chat_workflow').value || S.settings.workflow_path;
   if (!workflowDescription || path !== inspectedWorkflow) return savedWorkflowControls(path);
@@ -824,12 +978,20 @@ function currentWorkflowControls() {
   });
   return {resolution_node_id: $('resolutionSource').value,
           lora_target_id: $('loraTarget').value,
-          lora_nodes: existing, extra_loras: extra};
+          lora_nodes: existing, extra_loras: extra,
+          second_pass: currentSecondPassControls()};
 }
 async function loadWorkflowControls() {
   const path = $('chat_workflow').value || S.settings.workflow_path;
   workflowDescription = null;
   inspectedWorkflow = '';
+  $('secondPassMode').disabled = true;
+  $('secondPassNodes').replaceChildren();
+  $('secondPassAddFields').replaceChildren();
+  $('secondPassSource').replaceChildren();
+  $('secondPassNodes').classList.add('hidden');
+  $('secondPassAdd').classList.add('hidden');
+  $('secondPassStatus').textContent = path ? '正在读取二采节点…' : '请先选择工作流';
   if (!path) return;
   $('workflowControlStatus').textContent = '正在读取工作流节点…';
   $('addLoraButton').disabled = true;
@@ -888,9 +1050,12 @@ async function loadWorkflowControls() {
     $('extraLoras').replaceChildren();
     (controls.extra_loras || []).forEach(addLoraRow);
     $('addLoraButton').disabled = !data.samplers.length;
+    renderSecondPassControls(data, controls);
   } catch (e) {
-    if (path === ($('chat_workflow').value || S.settings.workflow_path))
+    if (path === ($('chat_workflow').value || S.settings.workflow_path)) {
       $('workflowControlStatus').textContent = '读取失败：' + e.message;
+      $('secondPassStatus').textContent = '读取失败：' + e.message;
+    }
   }
   try {
     const response = await api('/api/loras');

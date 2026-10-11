@@ -1,6 +1,7 @@
 """识别 API 工作流中的实际出图支路，并修改其可编辑输入。"""
 
 import copy
+import math
 
 
 SIZE_FIELDS = (
@@ -9,6 +10,22 @@ SIZE_FIELDS = (
     ("latent_width", "latent_height"),
 )
 LINK_FIELDS = ("latent_image", "latent", "samples", "image", "pixels")
+SAMPLING_FIELDS = (
+    "steps", "cfg", "denoise", "sampler_name", "scheduler",
+    "start_at_step", "end_at_step", "add_noise", "return_with_leftover_noise",
+)
+UPSCALE_FIELDS = ("width", "height", "scale_by", "upscale_method", "crop")
+UPSCALE_TYPES = ("LatentUpscale", "LatentUpscaleBy", "ImageScale", "ImageScaleBy")
+SECOND_PASS_NUMERIC = {
+    "steps": {"integer": True, "min": 1, "max": 10000},
+    "cfg": {"integer": False, "min": 0, "max": 100},
+    "denoise": {"integer": False, "min": 0, "max": 1},
+    "start_at_step": {"integer": True, "min": 0, "max": 10000},
+    "end_at_step": {"integer": True, "min": 0, "max": 10000},
+    "width": {"integer": True, "min": 0, "max": 16384},
+    "height": {"integer": True, "min": 0, "max": 16384},
+    "scale_by": {"integer": False, "min": 0.01, "max": 8},
+}
 
 
 def _link(value, workflow):
@@ -108,6 +125,76 @@ def _latent_size_sources(workflow, sampler_id):
     return candidates
 
 
+def _latent_branch(workflow, sampler_id):
+    start = _link(_inputs(workflow, sampler_id).get("latent_image"), workflow)
+    pending = [start] if start else []
+    nodes = set()
+    samplers = set()
+    while pending:
+        node_id = pending.pop()
+        if node_id in nodes:
+            continue
+        nodes.add(node_id)
+        if _is_sampler(workflow, node_id):
+            samplers.add(node_id)
+            continue
+        for key in LINK_FIELDS + ("images",):
+            parent = _link(_inputs(workflow, node_id).get(key), workflow)
+            if parent:
+                pending.append(parent)
+    return nodes, samplers
+
+
+def _parameter_node(workflow, node_id, fields):
+    node = workflow[node_id]
+    parameters = {key: value for key, value in _inputs(workflow, node_id).items()
+                  if key in fields}
+    return {
+        "id": node_id,
+        "title": str((node.get("_meta") or {}).get("title") or node.get("class_type")),
+        "class_type": node.get("class_type"),
+        "parameters": parameters,
+        "editable_fields": [key for key, value in parameters.items()
+                            if type(value) in (int, float, str)],
+    }
+
+
+def _describe_second_pass(workflow, active, samplers):
+    secondary = set()
+    upscalers = set()
+    for node_id in samplers:
+        branch, upstream = _latent_branch(workflow, node_id)
+        if upstream:
+            secondary.add(node_id)
+            upscalers.update(parent for parent in branch
+                             if workflow[parent].get("class_type") in UPSCALE_TYPES)
+    targets = []
+    for node_id in samplers:
+        inputs = _inputs(workflow, node_id)
+        if (secondary or workflow[node_id].get("class_type") != "KSampler"
+                or not all(key in inputs for key in
+                           ("seed", "steps", "cfg", "denoise", "sampler_name", "scheduler"))
+                or not all(_link(inputs.get(key), workflow)
+                           for key in ("model", "positive", "negative"))):
+            continue
+        decoders = [
+            parent for parent in workflow if parent in active
+            and workflow[parent].get("class_type") in ("VAEDecode", "VAEDecodeTiled")
+            and _inputs(workflow, parent).get("samples") == [node_id, 0]
+        ]
+        if decoders:
+            targets.append({**_parameter_node(workflow, node_id, SAMPLING_FIELDS),
+                            "decoder_ids": decoders})
+    return {
+        "samplers": [_parameter_node(workflow, node_id, SAMPLING_FIELDS)
+                     for node_id in workflow if node_id in secondary],
+        "upscalers": [_parameter_node(workflow, node_id, UPSCALE_FIELDS)
+                      for node_id in workflow if node_id in upscalers],
+        "add_targets": targets,
+        "numeric_rules": SECOND_PASS_NUMERIC,
+    }
+
+
 def describe_workflow(workflow, save_node_id=""):
     save_node_id = str(save_node_id)
     roots = ([save_node_id] if save_node_id in workflow else
@@ -157,7 +244,102 @@ def describe_workflow(workflow, save_node_id=""):
                 "title": str((workflow[node_id].get("_meta") or {}).get("title")
                              or workflow[node_id].get("class_type") or node_id)}
                for node_id in samplers if "model" in _inputs(workflow, node_id)]
-    return {"resolution_nodes": sizes, "lora_nodes": loras, "samplers": targets}
+    return {"resolution_nodes": sizes, "lora_nodes": loras, "samplers": targets,
+            "second_pass": _describe_second_pass(workflow, active, samplers)}
+
+
+def _second_pass_value(key, value):
+    if key in SECOND_PASS_NUMERIC:
+        rule = SECOND_PASS_NUMERIC[key]
+        try:
+            if isinstance(value, bool):
+                raise ValueError()
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError(f"二采参数 {key} 必须是数字")
+        if (not math.isfinite(number) or not rule["min"] <= number <= rule["max"]
+                or (rule["integer"] and not number.is_integer())):
+            kind = "整数" if rule["integer"] else "数字"
+            raise ValueError(f"二采参数 {key} 必须是 {rule['min']} 到 {rule['max']} 之间的{kind}")
+        return int(number) if rule["integer"] else number
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"二采参数 {key} 不能为空")
+    value = value.strip()
+    choices = {
+        "add_noise": ("enable", "disable"),
+        "return_with_leftover_noise": ("enable", "disable"),
+        "crop": ("disabled", "center"),
+    }
+    if key in choices and value not in choices[key]:
+        raise ValueError(f"二采参数 {key} 不支持 {value}")
+    return value
+
+
+def apply_second_pass(workflow, description, controls):
+    if not isinstance(controls, dict):
+        raise ValueError("二采参数格式不正确")
+    mode = controls.get("mode", "original")
+    if mode == "original":
+        return
+    details = description["second_pass"]
+    if mode == "existing":
+        available = {node["id"]: node for node in
+                     details["samplers"] + details["upscalers"]}
+        if not details["samplers"]:
+            raise ValueError("当前工作流没有已有二采，请选择新增二采")
+        overrides = controls.get("nodes", {})
+        if not isinstance(overrides, dict):
+            raise ValueError("二采节点参数格式不正确")
+        changes = {}
+        for node_id, values in overrides.items():
+            if node_id not in available or not isinstance(values, dict):
+                raise ValueError(f"二采节点不可用：{node_id}")
+            changes[node_id] = {}
+            for key, value in values.items():
+                if key not in available[node_id]["editable_fields"]:
+                    raise ValueError(f"二采节点 {node_id} 的 {key} 由上游控制或不支持修改")
+                changes[node_id][key] = _second_pass_value(key, value)
+            final = {**_inputs(workflow, node_id), **changes[node_id]}
+            start, end = final.get("start_at_step"), final.get("end_at_step")
+            if type(start) in (int, float) and type(end) in (int, float) and start > end:
+                raise ValueError("二采开始步数不能大于结束步数")
+        for node_id, values in changes.items():
+            workflow[node_id]["inputs"].update(values)
+        return
+    if mode != "add":
+        raise ValueError("二采模式不可用")
+    target_id = str(controls.get("source_sampler_id") or "")
+    target = next((node for node in details["add_targets"] if node["id"] == target_id), None)
+    if not target:
+        raise ValueError("无法新增二采；需要单轮 KSampler 直接连接 VAE 解码节点")
+    parameters = controls.get("parameters", {})
+    if not isinstance(parameters, dict):
+        raise ValueError("新增二采参数格式不正确")
+    allowed = ("steps", "cfg", "denoise", "sampler_name", "scheduler",
+               "scale_by", "upscale_method")
+    values = {"steps": 20, "denoise": 0.35, "scale_by": 1.5, "upscale_method": "bislerp"}
+    for key, value in parameters.items():
+        if key not in allowed:
+            raise ValueError(f"新增二采不支持 {key}")
+        values[key] = _second_pass_value(key, value)
+    if values["upscale_method"] not in ("nearest-exact", "bilinear", "area", "bicubic", "bislerp"):
+        raise ValueError("新增二采的 latent 放大方法不可用")
+    next_id = max((int(node_id) for node_id in workflow if node_id.isdecimal()), default=0) + 1
+    upscale_id, sampler_id = str(next_id), str(next_id + 1)
+    sampler = copy.deepcopy(workflow[target_id])
+    sampler["inputs"].update({key: value for key, value in values.items()
+                              if key in SAMPLING_FIELDS})
+    sampler["inputs"]["latent_image"] = [upscale_id, 0]
+    sampler["_meta"] = {"title": "二次采样"}
+    workflow[upscale_id] = {
+        "class_type": "LatentUpscaleBy",
+        "inputs": {"samples": [target_id, 0], "scale_by": values["scale_by"],
+                   "upscale_method": values["upscale_method"]},
+        "_meta": {"title": "二采前 latent 放大"},
+    }
+    workflow[sampler_id] = sampler
+    for decoder_id in target["decoder_ids"]:
+        workflow[decoder_id]["inputs"]["samples"] = [sampler_id, 0]
 
 
 def apply_resolution(workflow, description, width, height, selected="auto"):

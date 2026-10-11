@@ -18,7 +18,7 @@ from pathlib import Path
 
 import requests
 
-from workflow_controls import apply_loras, apply_resolution, describe_workflow
+from workflow_controls import apply_loras, apply_resolution, apply_second_pass, describe_workflow
 
 MIME_BY_EXT = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
@@ -264,6 +264,7 @@ class ComfyBackend:
             apply_loras(workflow, description, overrides, extra_loras,
                         str(controls.get("lora_target_id") or
                             (description["samplers"][0]["id"] if description["samplers"] else "")))
+            apply_second_pass(workflow, description, controls.get("second_pass", {}))
         except ValueError as e:
             raise BackendError(str(e)) from e
         size_nodes = [node for node in description["resolution_nodes"]
