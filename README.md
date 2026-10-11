@@ -64,12 +64,12 @@ llama-server -m 你的模型.gguf --port 8080
 
 ### 二、装 MCP 依赖
 
-国内镜像（清华源等）目前还没有收录 comfy-mcp，要用官方源。
+依赖安装使用[清华 PyPI 镜像](https://mirrors.tuna.tsinghua.edu.cn/help/pypi/)。
 两个包都要装：comfy-mcp 是 MCP 服务端，comfy-cli 是它背后的引擎，
 缺了后者 MCP 能握手但所有工具都会报 "comfy not found on PATH"。
 
 ```bash
-pip install "comfy-mcp" "comfy-cli>=1.14.0" -i https://pypi.org/simple
+python -m pip install "comfy-mcp" "comfy-cli>=1.14.0" -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
 > 如果装进了独立的虚拟环境，后面要在配置页填它们的绝对路径
@@ -77,11 +77,11 @@ pip install "comfy-mcp" "comfy-cli>=1.14.0" -i https://pypi.org/simple
 
 ### 三、启动服务端
 
-双击项目根目录的 `start.bat`，或者：
+双击项目根目录的 `start.bat`，首次安装依赖时会使用清华源；或者手动运行：
 
 ```bash
 cd server
-pip install -r requirements.txt
+python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 python app.py
 ```
 
@@ -245,7 +245,7 @@ ComfyUI 没启动，或地址不对。先确认 `http://127.0.0.1:8188` 能打�
 **MCP 显示未就绪，但出图正常**
 正常降级。引擎会退回直接调 ComfyUI 的 HTTP 接口，功能一样，
 只是少了 MCP 的节点/模型探查能力。常见原因：
-- 没装 comfy-mcp：`pip install comfy-mcp comfy-cli`
+- 没装 comfy-mcp：`python -m pip install comfy-mcp comfy-cli -i https://pypi.tuna.tsinghua.edu.cn/simple`
 - 装在虚拟环境里但没填 `comfy_bin`，报 "comfy not found on PATH"
 - 便携版没填 `comfy_project`（MCP 能握手，但模型/节点相关工具用不了）
 

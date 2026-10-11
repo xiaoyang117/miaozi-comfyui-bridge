@@ -28,7 +28,7 @@ rem ---------- 2. First-run dependency install ----------
 python -c "import flask,waitress,requests" >nul 2>&1
 if errorlevel 1 (
     echo  First run: installing dependencies...
-    python -m pip install -r "%~dp0server\requirements.txt"
+    python -m pip install -r "%~dp0server\requirements.txt" -i https://pypi.tuna.tsinghua.edu.cn/simple
     if errorlevel 1 (
         echo  Dependency install failed. Check your python environment.
         pause
