@@ -3,6 +3,7 @@
 import ipaddress
 import json
 import re
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 import requests
@@ -32,6 +33,34 @@ def clean_prompt(text: str) -> str:
 
 class LLMError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class GeneratedPrompt:
+    prompt: str
+    description: str = ""
+
+
+def parse_generated_prompt(text: str) -> GeneratedPrompt:
+    text = clean_prompt(text)
+    if text.startswith("["):
+        raise LLMError("模型返回格式不正确，请返回 prompt 和 description JSON 字段")
+    start = text.find("{")
+    if start < 0:
+        if re.search(r'(?im)^\s*["\']?(prompt|description|说明|画面说明)["\']?\s*[:：]',
+                     text):
+            raise LLMError("模型返回格式不正确，请返回 prompt 和 description JSON 字段")
+        return GeneratedPrompt(text)
+    try:
+        data, _ = json.JSONDecoder().raw_decode(text[start:])
+    except ValueError:
+        raise LLMError("模型返回的提示词和说明 JSON 格式不正确，请重试")
+    if not isinstance(data, dict) or not isinstance(data.get("prompt"), str):
+        raise LLMError("模型返回的 JSON 缺少有效的 prompt 字符串")
+    description = data.get("description", "")
+    if not isinstance(description, str):
+        raise LLMError("模型返回的 description 必须是字符串")
+    return GeneratedPrompt(clean_prompt(data["prompt"]), description.strip())
 
 
 class LLMClient:
@@ -130,15 +159,15 @@ class LLMClient:
 
     def generate_prompt(self, user_input: str, history_text: str = "",
                         context: str = "", specific: bool = False,
-                        custom_system: str = "") -> str:
-        """生成最终提示词。context 是角色库参考资料。"""
+                        custom_system: str = "",
+                        include_description: bool = False) -> str | GeneratedPrompt:
+        """生成提示词，可同时返回中文说明。context 是角色库参考资料。"""
         if context:
             template = P.PROMPT_WITH_CONTEXT_SPECIFIC if specific else P.PROMPT_WITH_CONTEXT
             body = f"角色参考资料：\n{context}\n\n用户需求：{user_input}"
             if history_text:
                 body = P.HISTORY_WRAPPER.format(
                     history=history_text, current=body)
-            raw = self.call(template, body)
         else:
             template = (custom_system.strip()
                         or (P.PROMPT_SYSTEM_SPECIFIC if specific else P.PROMPT_SYSTEM))
@@ -146,7 +175,12 @@ class LLMClient:
             if history_text:
                 body = P.HISTORY_WRAPPER.format(
                     history=history_text, current=user_input)
-            raw = self.call(template, body)
+        if include_description:
+            template = template.replace(P.PROMPT_ONLY_OUTPUT, "").rstrip()
+            template += "\n" + P.PROMPT_WITH_DESCRIPTION_OUTPUT
+        raw = self.call(template, body)
+        if include_description:
+            return parse_generated_prompt(raw)
         return clean_prompt(raw)
 
     def extract_tags(self, user_input: str) -> str:

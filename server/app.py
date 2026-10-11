@@ -24,7 +24,7 @@ from character_lookup import (direct_candidates, find_candidates,
                               is_built as char_db_built, lookup as char_lookup)
 from engine import engine
 from llm import LLMError
-from llm.client import LLMClient
+from llm.client import LLMClient, parse_generated_prompt
 from llm.prompts import build_history_text
 from settings import settings
 from store import store
@@ -664,16 +664,21 @@ def _run_generation(payload: dict):
         history_text = build_history_text(
             store.context_pairs(session_id, settings.history_rounds))
     try:
-        prompt = client.generate_prompt(
+        generated_prompt = client.generate_prompt(
             user_input_full,
             history_text=history_text,
             context=character_info,
             specific=specific,
             custom_system=settings.get("custom_system_prompt") or "",
+            include_description=True,
         )
+        if isinstance(generated_prompt, str):
+            generated_prompt = parse_generated_prompt(generated_prompt)
     except LLMError as e:
         yield _sse({"step": "error", "error": f"提示词生成失败：{e}"})
         return
+    prompt = generated_prompt.prompt
+    description = generated_prompt.description
     if not prompt:
         yield _sse({"step": "error", "error": "模型没有返回提示词，请重试"})
         return
@@ -699,6 +704,7 @@ def _run_generation(payload: dict):
     store.add_message(session_id, "assistant", content=prompt,
                       image=image_url, character=character_info,
                       meta={"width": width, "height": height,
+                            "description": description,
                             "workflow_path": workflow_path,
                             "workflow_controls": controls,
                             "resize": resize,
@@ -709,6 +715,7 @@ def _run_generation(payload: dict):
                             "character_ids": [c["character"] for c in characters]})
 
     yield _sse({"step": "done", "image": image_url, "prompt": prompt,
+                "description": description,
                 "character": character_info, "vlm": vlm_text,
                 "session_id": session_id})
 
@@ -728,6 +735,9 @@ def _run_regeneration(payload: dict):
 
     prompt = source["content"]
     meta = source["meta"]
+    description = meta.get("description", "")
+    if not isinstance(description, str):
+        description = ""
     workflow_path = _resolve_workflow_path(
         meta.get("workflow_path") or payload.get("workflow_path"))
     if not workflow_path:
@@ -755,12 +765,14 @@ def _run_regeneration(payload: dict):
                       image=image_url, character=source["character"],
                       vlm=source["vlm"],
                       meta={**meta, "width": width, "height": height,
+                            "description": description,
                             "workflow_path": workflow_path,
                             "workflow_controls": controls, "resize": resize,
                             "elapsed": result.get("elapsed"),
                             "regenerated_from": source["id"],
                             "character_status": "再次生成：复用提示词，未调用 LLM"})
     yield _sse({"step": "done", "image": image_url, "prompt": prompt,
+                "description": description,
                 "session_id": session_id})
 
 
