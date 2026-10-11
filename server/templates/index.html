@@ -43,9 +43,8 @@
   <main class="main">
     <div class="topbar">
       <button class="btn-icon btn-menu" title="对话列表" aria-label="打开对话列表" onclick="toggleSidebar()">☰</button>
-      <div class="topbar-title">创作工作台 <span> / 把灵感变成画面</span></div>
       <nav class="tabs">
-        <button class="tab active" data-tab="chat" onclick="switchTab('chat')">对话</button>
+        <button class="tab active" data-tab="chat" onclick="switchTab('chat')">创作</button>
         <button class="tab" data-tab="settings" onclick="switchTab('settings')">配置</button>
         <button class="tab" data-tab="plugins" onclick="switchTab('plugins')">插件</button>
       </nav>
@@ -54,6 +53,12 @@
 
     <!-- -------- 对话面板 -------- -->
     <div id="panel-chat" class="panel active">
+      <div class="chat-stage">
+        <div class="canvas-heading">
+          <div><span class="eyebrow">当前创作</span><h1 id="activeSessionTitle">新对话</h1></div>
+          <button id="panelControlsButton" class="btn-secondary" type="button"
+                  aria-controls="controlPanel" aria-expanded="false" onclick="toggleControls()">生成参数</button>
+        </div>
       <template id="emptyTemplate">
         <div class="empty-hint">
           <div class="hero-symbol" aria-hidden="true">✦</div>
@@ -95,51 +100,6 @@
             精细还原
           </label>
         </div>
-        <div class="chat-toggle-row">
-          <div class="pick">
-            <select id="chat_workflow" title="工作流" aria-label="工作流"></select>
-          </div>
-          <div class="pick">
-            <select id="chat_preset" title="分辨率" aria-label="分辨率"></select>
-          </div>
-        </div>
-        <details class="workflow-controls">
-          <summary>工作流尺寸与 LoRA</summary>
-          <p id="workflowControlStatus" class="hint">选择工作流后读取节点</p>
-          <label for="resolutionSource">修改尺寸的节点</label>
-          <select id="resolutionSource" aria-label="修改尺寸的节点">
-            <option value="auto">自动识别出图支路</option>
-          </select>
-          <div id="workflowSizes" class="hint"></div>
-          <div id="workflowLoras"></div>
-          <div id="extraLoras"></div>
-          <button id="addLoraButton" type="button" class="btn-secondary" onclick="addLoraRow()">添加 LoRA</button>
-          <label for="loraTarget">新增 LoRA 接入的采样器</label>
-          <select id="loraTarget"></select>
-          <datalist id="loraNames"></datalist>
-          <p id="loraModelStatus" class="hint"></p>
-          <button type="button" class="btn-secondary" onclick="saveWorkflowControls()">保存此工作流参数</button>
-        </details>
-        <details class="workflow-controls">
-          <summary>二次采样专区</summary>
-          <p class="hint">先生成底图，再放大并补充细节。默认保持工作流原设置。</p>
-          <p id="secondPassStatus" class="hint">选择工作流后读取二采节点</p>
-          <label for="secondPassMode">二采方式</label>
-          <select id="secondPassMode" onchange="updateSecondPassMode()" disabled>
-            <option value="original">保持工作流原设置</option>
-            <option value="existing">调整已有二采</option>
-            <option value="add">新增二采</option>
-          </select>
-          <div id="secondPassNodes" class="hidden"></div>
-          <div id="secondPassAdd" class="hidden">
-            <label for="secondPassSource">使用哪轮底图</label>
-            <select id="secondPassSource" onchange="renderSecondPassAddition()"></select>
-            <div id="secondPassAddFields" class="sampling-fields"></div>
-            <p class="hint">继承底图的模型、LoRA 和提示词，在 VAE 解码前加入 latent 放大与二采。</p>
-          </div>
-          <p class="hint">降噪越高，画面变化通常越大；放大倍数会增加显存和耗时。采样器与调度器请填写 ComfyUI 可用的名称。</p>
-          <button type="button" class="btn-secondary" onclick="saveWorkflowControls()">保存此工作流参数</button>
-        </details>
         <div class="chat-input-row">
           <div class="textarea-wrap">
             <textarea id="chatInput" rows="3" placeholder="例如：雨后的城市街头，暖色灯光，电影质感…" aria-label="图片描述"></textarea>
@@ -155,6 +115,58 @@
           <button class="btn-remove-img" onclick="removeImage()">×</button>
         </div>
       </div>
+      </div>
+      <div id="controlsMask" class="controls-mask hidden" onclick="closeControls()"></div>
+      <aside id="controlPanel" class="control-panel" aria-label="生成参数">
+        <div class="control-panel-heading"><h2>生成参数</h2>
+          <button class="btn-icon controls-close" type="button" aria-label="关闭生成参数" onclick="closeControls()">×</button>
+        </div>
+        <div class="control-panel-body">
+          <div class="control-picks">
+            <label for="chat_workflow">工作流</label>
+            <select id="chat_workflow" aria-label="工作流"></select>
+            <label for="chat_preset">分辨率</label>
+            <select id="chat_preset" aria-label="分辨率"></select>
+          </div>
+          <details class="workflow-controls" open>
+            <summary>工作流尺寸与 LoRA</summary>
+            <p id="workflowControlStatus" class="hint">选择工作流后读取节点</p>
+            <label for="resolutionSource">修改尺寸的节点</label>
+            <select id="resolutionSource" aria-label="修改尺寸的节点">
+              <option value="auto">自动识别出图支路</option>
+            </select>
+            <div id="workflowSizes" class="hint"></div>
+            <div id="workflowLoras"></div>
+            <div id="extraLoras"></div>
+            <button id="addLoraButton" type="button" class="btn-secondary" onclick="addLoraRow()">添加 LoRA</button>
+            <label for="loraTarget">新增 LoRA 接入的采样器</label>
+            <select id="loraTarget"></select>
+            <datalist id="loraNames"></datalist>
+            <p id="loraModelStatus" class="hint"></p>
+            <button type="button" class="btn-secondary" onclick="saveWorkflowControls()">保存此工作流参数</button>
+          </details>
+          <details class="workflow-controls" open>
+            <summary>二次采样专区</summary>
+            <p class="hint">先生成底图，再放大并补充细节。默认保持工作流原设置。</p>
+            <p id="secondPassStatus" class="hint">选择工作流后读取二采节点</p>
+            <label for="secondPassMode">二采方式</label>
+            <select id="secondPassMode" onchange="updateSecondPassMode()" disabled>
+              <option value="original">保持工作流原设置</option>
+              <option value="existing">调整已有二采</option>
+              <option value="add">新增二采</option>
+            </select>
+            <div id="secondPassNodes" class="hidden"></div>
+            <div id="secondPassAdd" class="hidden">
+              <label for="secondPassSource">使用哪轮底图</label>
+              <select id="secondPassSource" onchange="renderSecondPassAddition()"></select>
+              <div id="secondPassAddFields" class="sampling-fields"></div>
+              <p class="hint">继承底图的模型、LoRA 和提示词，在 VAE 解码前加入 latent 放大与二采。</p>
+            </div>
+            <p class="hint">降噪越高，画面变化通常越大；放大倍数会增加显存和耗时。采样器与调度器请填写 ComfyUI 可用的名称。</p>
+            <button type="button" class="btn-secondary" onclick="saveWorkflowControls()">保存此工作流参数</button>
+          </details>
+        </div>
+      </aside>
     </div>
 
     <!-- -------- 配置面板 -------- -->
@@ -379,6 +391,7 @@ async function submitGate() {
 
 // ==================== 基础 UI ====================
 function switchTab(name) {
+  closeControls();
   document.querySelectorAll('.tab').forEach(t =>
     t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.panel').forEach(p =>
@@ -393,6 +406,23 @@ function closeSidebar() {
   $('sidebar').classList.remove('open');
   $('sidebarMask').classList.add('hidden');
 }
+function toggleControls() {
+  const open = $('controlPanel').classList.toggle('open');
+  $('controlsMask').classList.toggle('hidden', !open);
+  $('panelControlsButton').setAttribute('aria-expanded', String(open));
+  if (open) $('controlPanel').querySelector('.controls-close').focus();
+}
+function closeControls() {
+  $('controlPanel').classList.remove('open');
+  $('controlsMask').classList.add('hidden');
+  $('panelControlsButton').setAttribute('aria-expanded', 'false');
+}
+window.addEventListener('resize', () => {
+  if (window.innerWidth > 1140) closeControls();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeControls();
+});
 function showError(msg) {
   $('settingsErrorText').textContent = msg;
   $('settingsError').classList.remove('hidden');
@@ -574,6 +604,8 @@ async function loadBootstrap() {
 function renderSessions() {
   const box = $('sessionList');
   box.replaceChildren();
+  const current = S.sessions.find(s => s.id === S.currentSession);
+  $('activeSessionTitle').textContent = (current && current.title) || '新对话';
   const query = $('sessionSearch').value.trim().toLocaleLowerCase();
   const sessions = S.sessions.filter(s => (s.title || '新对话').toLocaleLowerCase().includes(query));
   if (!sessions.length) {
@@ -786,6 +818,7 @@ function renderMessage(m) {
       wrap.className = 'chat-image-wrap';
       const img = document.createElement('img');
       img.className = 'chat-image';
+      img.alt = description || '生成的图片';
       img.loading = 'lazy';
       img.src = m.image;
       img.onclick = () => showImageModal(m.image);
@@ -832,6 +865,9 @@ function renderMessage(m) {
         setTimeout(() => { btn.textContent = '保存'; }, 1800);
       }));
       div.appendChild(bar);
+      const note = div.querySelector('.image-description');
+      div.insertBefore(wrap, note || div.children[1] || null);
+      div.insertBefore(bar, note ? note.nextSibling : wrap.nextSibling);
     }
   }
 
