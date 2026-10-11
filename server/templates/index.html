@@ -102,6 +102,23 @@
             <select id="chat_preset" title="分辨率" aria-label="分辨率"></select>
           </div>
         </div>
+        <details class="workflow-controls">
+          <summary>工作流尺寸与 LoRA</summary>
+          <p id="workflowControlStatus" class="hint">选择工作流后读取节点</p>
+          <label for="resolutionSource">修改尺寸的节点</label>
+          <select id="resolutionSource" aria-label="修改尺寸的节点">
+            <option value="auto">自动识别出图支路</option>
+          </select>
+          <div id="workflowSizes" class="hint"></div>
+          <div id="workflowLoras"></div>
+          <div id="extraLoras"></div>
+          <button id="addLoraButton" type="button" class="btn-secondary" onclick="addLoraRow()">添加 LoRA</button>
+          <label for="loraTarget">新增 LoRA 接入的采样器</label>
+          <select id="loraTarget"></select>
+          <datalist id="loraNames"></datalist>
+          <p id="loraModelStatus" class="hint"></p>
+          <button type="button" class="btn-secondary" onclick="saveWorkflowControls()">保存此工作流参数</button>
+        </details>
         <div class="chat-input-row">
           <div class="textarea-wrap">
             <textarea id="chatInput" rows="3" placeholder="例如：雨后的城市街头，暖色灯光，电影质感…" aria-label="图片描述"></textarea>
@@ -202,7 +219,7 @@
         <input id="s_gen_height" type="number" min="64" max="4096">
         <label>分辨率预设（JSON 数组）</label>
         <textarea id="s_resolution_presets" rows="5" spellcheck="false"></textarea>
-        <p class="hint">工作流里写上占位符（如 chang / gao）才会被替换。</p>
+        <p class="hint">选择分辨率时会自动识别实际出图的尺寸节点；复杂尺寸计算仍可使用旧版宽高占位符。</p>
       </div>
 
       <div class="settings-group">
@@ -285,6 +302,9 @@ let selectedImages = [];
 let isGenerating = false;
 let accessPassword = localStorage.getItem('mz_pw') || '';
 let sendQueueHint = null;
+let inspectedWorkflow = '';
+let workflowDescription = null;
+let loraModels = [];
 
 const $ = id => document.getElementById(id);
 
@@ -698,6 +718,7 @@ async function loadWorkflowList(notify) {
       if (cur && list.some(w => w.path === cur)) sel.value = cur;
       else if (list.length) selectWorkflowPath(list[0].path, false);
     }
+    loadWorkflowControls();
     if (notify) showModal(`读取到 ${list.length} 个工作流\n${d.dir || ''}`, 'success');
   } catch (e) {
     sel.innerHTML = '<option value="">加载失败</option>';
@@ -710,7 +731,12 @@ function selectWorkflowPath(path, syncInput) {
 }
 function renderPresets() {
   const sel = $('chat_preset');
+  const previous = sel.value;
   sel.innerHTML = '';
+  const original = document.createElement('option');
+  original.value = '-1';
+  original.textContent = '保持工作流原尺寸';
+  sel.appendChild(original);
   const presets = S.settings.resolution_presets || [];
   presets.forEach((p, i) => {
     const o = document.createElement('option');
@@ -718,6 +744,185 @@ function renderPresets() {
     o.textContent = p.label || (p.width + '×' + p.height);
     sel.appendChild(o);
   });
+  sel.value = [...sel.options].some(o => o.value === previous) ? previous
+    : (presets.length ? '0' : '-1');
+}
+
+function savedWorkflowControls(path) {
+  return (S.settings.workflow_controls || {})[path] || {};
+}
+function makeLoraField(label, value, type = 'text') {
+  const wrapper = document.createElement('label');
+  wrapper.textContent = label;
+  const input = document.createElement('input');
+  input.type = type;
+  input.value = value == null ? '' : value;
+  if (type === 'number') {
+    input.step = '0.05';
+    input.min = '-100'; input.max = '100';
+  } else {
+    input.setAttribute('list', 'loraNames');
+  }
+  wrapper.appendChild(input);
+  return wrapper;
+}
+function addLoraRow(item = {}) {
+  const row = document.createElement('div');
+  row.className = 'lora-row';
+  const name = makeLoraField('LoRA 文件名', item.lora_name || '');
+  name.querySelector('input').className = 'lora-name';
+  row.appendChild(name);
+  const weights = document.createElement('div');
+  weights.className = 'row-gap';
+  const model = makeLoraField('模型权重', item.strength_model ?? 1, 'number');
+  model.querySelector('input').className = 'lora-model';
+  const clip = makeLoraField('文本权重', item.strength_clip ?? 1, 'number');
+  clip.querySelector('input').className = 'lora-clip';
+  weights.append(model, clip);
+  row.appendChild(weights);
+  const only = document.createElement('label');
+  const checkbox = document.createElement('input');
+  checkbox.type = 'checkbox';
+  checkbox.className = 'lora-model-only';
+  checkbox.checked = item.model_only === true;
+  clip.querySelector('input').disabled = checkbox.checked;
+  checkbox.onchange = () => { clip.querySelector('input').disabled = checkbox.checked; };
+  only.append(checkbox, document.createTextNode(' 仅模型（工作流没有共用 CLIP 支路时选择）'));
+  row.appendChild(only);
+  const remove = document.createElement('button');
+  remove.type = 'button'; remove.className = 'btn-secondary';
+  remove.textContent = '移除';
+  remove.onclick = () => row.remove();
+  row.appendChild(remove);
+  $('extraLoras').appendChild(row);
+}
+function currentWorkflowControls() {
+  const path = $('chat_workflow').value || S.settings.workflow_path;
+  if (!workflowDescription || path !== inspectedWorkflow) return savedWorkflowControls(path);
+  const existing = {};
+  document.querySelectorAll('#workflowLoras .lora-row').forEach(row => {
+    const values = {};
+    row.querySelectorAll('input[data-field]').forEach(input => {
+      values[input.dataset.field] = input.value;
+    });
+    if (Object.keys(values).length) existing[row.dataset.nodeId] = values;
+  });
+  const extra = [...document.querySelectorAll('#extraLoras .lora-row')].map(row => ({
+    lora_name: row.querySelector('.lora-name').value.trim(),
+    strength_model: row.querySelector('.lora-model').value,
+    strength_clip: row.querySelector('.lora-clip').value,
+    model_only: row.querySelector('.lora-model-only').checked,
+  }));
+  [...Object.values(existing), ...extra].forEach(item => {
+    if ('lora_name' in item && !item.lora_name.trim()) throw new Error('LoRA 文件名不能为空');
+    ['strength_model', 'strength_clip', 'strength'].forEach(key => {
+      if (!(key in item) || (key === 'strength_clip' && item.model_only)) return;
+      const value = String(item[key]).trim();
+      if (!value || !Number.isFinite(Number(value)) || Math.abs(Number(value)) > 100)
+        throw new Error('LoRA 权重必须是 -100 到 100 之间的数字');
+    });
+  });
+  return {resolution_node_id: $('resolutionSource').value,
+          lora_target_id: $('loraTarget').value,
+          lora_nodes: existing, extra_loras: extra};
+}
+async function loadWorkflowControls() {
+  const path = $('chat_workflow').value || S.settings.workflow_path;
+  workflowDescription = null;
+  inspectedWorkflow = '';
+  if (!path) return;
+  $('workflowControlStatus').textContent = '正在读取工作流节点…';
+  $('addLoraButton').disabled = true;
+  try {
+    const response = await api('/api/workflows/inspect?path=' + encodeURIComponent(path));
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.error || '无法读取工作流');
+    if (path !== ($('chat_workflow').value || S.settings.workflow_path)) return;
+    workflowDescription = data;
+    inspectedWorkflow = path;
+    const controls = savedWorkflowControls(path);
+    const size = $('resolutionSource');
+    size.replaceChildren(new Option('自动识别出图支路', 'auto'));
+    (data.resolution_nodes || []).forEach(node => {
+      if (!node.active || !node.editable) return;
+      size.add(new Option(`${node.title} #${node.id} · ${node.width}×${node.height}`,
+                          node.id));
+    });
+    size.value = controls.resolution_node_id || 'auto';
+    if (!size.value) size.value = 'auto';
+    const recommended = data.resolution_nodes.filter(node => node.recommended);
+    $('workflowSizes').textContent = recommended.length
+      ? `自动识别：${recommended.map(node => `${node.title} #${node.id}（${node.width ?? '?'}×${node.height ?? '?'}）`).join('、')}`
+      : '没有可自动识别的尺寸节点；可选择保留原尺寸或使用旧版宽高占位符。';
+    $('workflowControlStatus').textContent = '工作流节点已读取';
+    const target = $('loraTarget');
+    target.replaceChildren();
+    (data.samplers || []).forEach(node =>
+      target.add(new Option(`${node.title} #${node.id}`, node.id)));
+    target.value = controls.lora_target_id || (data.samplers[0] || {}).id || '';
+    $('workflowLoras').replaceChildren();
+    const activeLoras = (data.lora_nodes || []).filter(node => node.active);
+    if (!activeLoras.length) {
+      $('workflowLoras').textContent = data.lora_nodes.length
+        ? '发现未接入出图支路的 LoRA 节点，不会修改它；也可在下方添加。'
+        : '此工作流未检测到 LoRA 节点，可在下方添加。';
+    }
+    activeLoras.forEach(node => {
+      const row = document.createElement('div');
+      row.className = 'lora-row'; row.dataset.nodeId = node.id;
+      const title = document.createElement('strong');
+      title.textContent = `${node.title} #${node.id}（已有 LoRA）`;
+      row.appendChild(title);
+      const values = (controls.lora_nodes || {})[node.id] || {};
+      ['lora_name', 'strength_model', 'strength_clip', 'strength'].forEach(key => {
+        if (node[key] == null || typeof node[key] === 'object') return;
+        const field = makeLoraField(
+          {lora_name: '文件名', strength_model: '模型权重',
+           strength_clip: '文本权重', strength: '权重'}[key],
+          values[key] ?? node[key], key === 'lora_name' ? 'text' : 'number');
+        field.querySelector('input').dataset.field = key;
+        row.appendChild(field);
+      });
+      $('workflowLoras').appendChild(row);
+    });
+    $('extraLoras').replaceChildren();
+    (controls.extra_loras || []).forEach(addLoraRow);
+    $('addLoraButton').disabled = !data.samplers.length;
+  } catch (e) {
+    if (path === ($('chat_workflow').value || S.settings.workflow_path))
+      $('workflowControlStatus').textContent = '读取失败：' + e.message;
+  }
+  try {
+    const response = await api('/api/loras');
+    const data = await response.json();
+    loraModels = data.models || [];
+    $('loraNames').replaceChildren(...loraModels.map(name => new Option(name)));
+    $('loraModelStatus').textContent = data.success
+      ? `ComfyUI 中有 ${loraModels.length} 个 LoRA；也可以直接输入文件名。`
+      : '暂时无法读取 ComfyUI 的 LoRA 列表；可手动填写准确文件名。';
+  } catch (e) {
+    $('loraModelStatus').textContent = '无法获取 LoRA 列表；可手动填写准确文件名。';
+  }
+  if (workflowDescription && !workflowDescription.samplers.length)
+    $('loraModelStatus').textContent += ' 未找到有模型输入的采样器，无法添加 LoRA。';
+}
+async function saveWorkflowControls() {
+  const path = $('chat_workflow').value || S.settings.workflow_path;
+  if (!path) return showError('请先选择工作流');
+  if (!workflowDescription || inspectedWorkflow !== path) {
+    return showError('请先等工作流节点读取完成');
+  }
+  try {
+    const updated = {...(S.settings.workflow_controls || {}),
+                     [path]: currentWorkflowControls()};
+    const response = await api('/api/settings', {
+      method: 'POST', body: {workflow_controls: updated},
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.error || '保存失败');
+    S.settings = data.settings;
+    showModal('此工作流参数已保存', 'success');
+  } catch (e) { showError('保存工作流参数失败：' + e.message); }
 }
 
 // ==================== 发送 ====================
@@ -733,6 +938,9 @@ async function sendMessage(regenerate = null) {
   const input = $('chatInput');
   const text = regenerate ? '' : input.value.trim();
   if (!regenerate && !text) return;
+  let workflowControls;
+  try { workflowControls = regenerate ? null : currentWorkflowControls(); }
+  catch (e) { showModal(e.message); return; }
 
   if (!S.currentSession) await newSession(false);
 
@@ -766,6 +974,7 @@ async function sendMessage(regenerate = null) {
       workflow_path: $('chat_workflow').value || S.settings.workflow_path,
       preset_index: parseInt($('chat_preset').value, 10),
       images: images,
+      workflow_controls: workflowControls,
     };
 
     if (regenerate) setStep('comfyui');
@@ -1105,6 +1314,7 @@ chatInput.addEventListener('drop', e => {
 
 $('chat_workflow').addEventListener('change', function () {
   $('s_workflow_path').value = this.value;
+  loadWorkflowControls();
 });
 
 // 主动刷新引擎状态，让「离线/在线」能自己变

@@ -18,6 +18,8 @@ from pathlib import Path
 
 import requests
 
+from workflow_controls import apply_loras, apply_resolution, describe_workflow
+
 MIME_BY_EXT = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
     ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp",
@@ -146,6 +148,19 @@ class ComfyBackend:
             raise BackendError("工作流 JSON 格式不正确")
         return data
 
+    def inspect_workflow(self, path: str) -> dict:
+        return describe_workflow(self._load_workflow(path), self.save_node_id)
+
+    def list_loras(self) -> list[str]:
+        if not self.http_url:
+            raise BackendError("请先配置 ComfyUI 地址")
+        response = self.session.get(f"{self.http_url}/models/loras", timeout=8)
+        response.raise_for_status()
+        names = response.json()
+        if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+            raise BackendError("ComfyUI 返回的 LoRA 列表格式不正确")
+        return sorted(names)
+
     @staticmethod
     def _json_token(value) -> str:
         return json.dumps(value, ensure_ascii=False)
@@ -216,7 +231,46 @@ class ComfyBackend:
             ph = str(self.cfg.get("prompt_placeholder") or "").strip()
             if ph:
                 replacements[ph] = prompt
+        raw = json.dumps(workflow, ensure_ascii=False)
+        size_placeholders = [str(self.cfg.get(key) or "").strip()
+                             for key in ("width_placeholder", "height_placeholder")]
+        matched_sizes = [
+            bool(placeholder and json.dumps(placeholder, ensure_ascii=False)[1:-1] in raw)
+            for placeholder in size_placeholders
+        ]
+        if job.get("resize") is False and any(matched_sizes):
+            raise BackendError("工作流含有宽高占位符，请选择分辨率预设")
         workflow = self._apply_replacements(workflow, replacements)
+        controls = job.get("workflow_controls") or {}
+        if not isinstance(controls, dict):
+            raise BackendError("工作流参数格式不正确")
+        try:
+            description = describe_workflow(workflow, self.save_node_id)
+            if job.get("resize"):
+                recommended = [node for node in description["resolution_nodes"]
+                               if node["recommended"]]
+                use_placeholders = (
+                    controls.get("resolution_node_id", "auto") == "auto"
+                    and all(matched_sizes)
+                    and (not recommended or not all(node["editable"] for node in recommended))
+                )
+                if not use_placeholders:
+                    apply_resolution(workflow, description, job["width"], job["height"],
+                                     controls.get("resolution_node_id", "auto"))
+            overrides = controls.get("lora_nodes") or {}
+            extra_loras = controls.get("extra_loras") or []
+            if not isinstance(overrides, dict) or not isinstance(extra_loras, list):
+                raise BackendError("LoRA 参数格式不正确")
+            apply_loras(workflow, description, overrides, extra_loras,
+                        str(controls.get("lora_target_id") or
+                            (description["samplers"][0]["id"] if description["samplers"] else "")))
+        except ValueError as e:
+            raise BackendError(str(e)) from e
+        size_nodes = [node for node in description["resolution_nodes"]
+                      if node["recommended"] and node["width"] and node["height"]]
+        base_size = ([job["width"], job["height"]] if job.get("resize")
+                     else [size_nodes[0]["width"], size_nodes[0]["height"]]
+                     if size_nodes else None)
         if job.get("randomize_seed"):
             self._randomize_seeds(workflow)
 
@@ -308,7 +362,7 @@ class ComfyBackend:
         except Exception:
             pass
 
-        return {"image": data_url, "elapsed": elapsed,
+        return {"image": data_url, "elapsed": elapsed, "base_size": base_size,
                 "prompt_id": prompt_id, "workflow": os.path.basename(str(workflow_path))}
 
     # ---------- 结果获取 ----------

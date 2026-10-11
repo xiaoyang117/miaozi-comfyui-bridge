@@ -40,6 +40,8 @@ class Engine:
             "workflow_dirs": settings.get("workflow_dirs"),
             "workflow_path": settings.get("workflow_path"),
             "prompt_placeholder": settings.get("prompt_placeholder"),
+            "width_placeholder": settings.get("width_placeholder"),
+            "height_placeholder": settings.get("height_placeholder"),
             "poll_interval": settings.get("poll_interval"),
             "image_max_dim": settings.get("image_max_dim"),
             "image_format": settings.get("image_format"),
@@ -141,6 +143,12 @@ class Engine:
     def list_workflows(self, extra_dir: str = "") -> dict:
         self.ensure_mcp()
         return self._backend().list_workflows(extra_dir)
+
+    def inspect_workflow(self, path: str) -> dict:
+        return self._backend().inspect_workflow(path)
+
+    def list_loras(self) -> list[str]:
+        return self._backend().list_loras()
 
     def generate(self, job: dict) -> dict:
         self.ensure_mcp()

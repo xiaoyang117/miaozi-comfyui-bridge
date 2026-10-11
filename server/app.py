@@ -493,6 +493,25 @@ def api_workflows():
         return jsonify({"success": False, "error": str(e)}), 200
 
 
+@app.route("/api/workflows/inspect")
+def api_workflow_inspect():
+    try:
+        path = _resolve_workflow_path(request.args.get("path"))
+        if not path:
+            return jsonify({"error": "请先选择工作流"}), 400
+        return jsonify({"success": True, **engine.inspect_workflow(path)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/loras")
+def api_loras():
+    try:
+        return jsonify({"success": True, "models": engine.list_loras()})
+    except Exception as e:
+        return jsonify({"success": False, "models": [], "error": str(e)})
+
+
 # ---------------------------------------------------------------- 生成主流程
 
 @app.route("/api/generate", methods=["POST"])
@@ -533,6 +552,11 @@ def _run_generation(payload: dict):
     if not workflow_path:
         yield _sse({"step": "error",
                     "error": "没有找到工作流文件。请在配置页设置工作流路径"})
+        return
+    try:
+        controls = _workflow_controls(workflow_path, payload)
+    except ValueError as e:
+        yield _sse({"step": "error", "error": str(e)})
         return
     width, height = settings.resolve_size(payload.get("preset_index"))
     images = payload.get("images") or []
@@ -659,10 +683,13 @@ def _run_generation(payload: dict):
     if positive_prefix:
         prompt = f"{positive_prefix}, {prompt}"
 
-    generated = yield from _generate_image(prompt, workflow_path, width, height)
+    resize = payload.get("preset_index") != -1
+    generated = yield from _generate_image(prompt, workflow_path, width, height,
+                                           controls=controls, resize=resize)
     if generated is None:
         return
     result, image_url = generated
+    width, height = result.get("base_size") or (width, height)
 
     # ---------- 4. 落库 ----------
     store.add_message(session_id, "user", content=user_input,
@@ -673,6 +700,8 @@ def _run_generation(payload: dict):
                       image=image_url, character=character_info,
                       meta={"width": width, "height": height,
                             "workflow_path": workflow_path,
+                            "workflow_controls": controls,
+                            "resize": resize,
                             "elapsed": result.get("elapsed"),
                             "character_status": character_status,
                             "character_id": (characters[0]["character"]
@@ -708,16 +737,26 @@ def _run_regeneration(payload: dict):
     default_width, default_height = settings.resolve_size(payload.get("preset_index"))
     width = meta.get("width") or default_width
     height = meta.get("height") or default_height
+    try:
+        controls = (meta.get("workflow_controls") if isinstance(meta.get("workflow_controls"), dict)
+                    else _workflow_controls(workflow_path, payload))
+    except ValueError as e:
+        yield _sse({"step": "error", "error": str(e)})
+        return
+    resize = meta.get("resize", True)
     generated = yield from _generate_image(
-        prompt, workflow_path, width, height, randomize_seed=True)
+        prompt, workflow_path, width, height, randomize_seed=True,
+        controls=controls, resize=resize)
     if generated is None:
         return
     result, image_url = generated
+    width, height = result.get("base_size") or (width, height)
     store.add_message(session_id, "assistant", content=prompt,
                       image=image_url, character=source["character"],
                       vlm=source["vlm"],
                       meta={**meta, "width": width, "height": height,
                             "workflow_path": workflow_path,
+                            "workflow_controls": controls, "resize": resize,
                             "elapsed": result.get("elapsed"),
                             "regenerated_from": source["id"],
                             "character_status": "再次生成：复用提示词，未调用 LLM"})
@@ -725,18 +764,35 @@ def _run_regeneration(payload: dict):
                 "session_id": session_id})
 
 
+def _workflow_controls(workflow_path: str, payload: dict) -> dict:
+    saved = settings.get("workflow_controls") or {}
+    if not isinstance(saved, dict):
+        saved = {}
+    controls = payload.get("workflow_controls", saved.get(workflow_path) or {})
+    if not isinstance(controls, dict):
+        raise ValueError("工作流参数格式不正确")
+    return controls
+
+
 def _generate_image(prompt: str, workflow_path: str, width: int, height: int,
-                    randomize_seed: bool = False):
+                    randomize_seed: bool = False, controls: dict = None,
+                    resize: bool = True):
     yield _sse({"step": "comfyui"})
     try:
+        replacements = settings.build_replacements(prompt, width, height)
+        if not resize:
+            placeholder = str(settings.get("prompt_placeholder") or "").strip()
+            replacements = {placeholder: prompt} if placeholder else {}
         result = engine.generate({
             "workflow_path": workflow_path,
             "prompt": prompt,
-            "replacements": settings.build_replacements(prompt, width, height),
+            "replacements": replacements,
             "width": width,
             "height": height,
             "timeout": settings.comfy_timeout,
             "randomize_seed": randomize_seed,
+            "resize": resize,
+            "workflow_controls": controls or {},
         })
     except Exception as e:
         yield _sse({"step": "error", "error": f"ComfyUI 执行失败：{e}"})

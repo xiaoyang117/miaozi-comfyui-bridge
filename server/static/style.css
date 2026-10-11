@@ -287,6 +287,17 @@ body {
   outline: none; cursor: pointer;
 }
 .pick select:focus { border-color: var(--accent); }
+.workflow-controls {
+  border: 1px solid var(--line-soft); border-radius: 8px;
+  background: var(--bg-card); padding: 9px 12px; margin-bottom: 10px;
+}
+.workflow-controls summary { cursor: pointer; font-size: .8rem; color: var(--text-dim); }
+.workflow-controls label { display: block; margin: 10px 0 4px; font-size: .76rem; color: var(--text-dim); }
+.workflow-controls .lora-row { border-top: 1px solid var(--line-soft); padding-top: 8px; margin-top: 10px; }
+.workflow-controls .lora-row .row-gap { margin-top: 4px; }
+.workflow-controls .lora-row .row-gap > label { flex: 1; min-width: 80px; }
+.workflow-controls .lora-row input[type="checkbox"] { width: auto; height: auto; vertical-align: middle; }
+.workflow-controls > button { margin: 10px 8px 0 0; }
 
 .toggle-label {
   display: inline-flex; align-items: center; gap: 7px;
