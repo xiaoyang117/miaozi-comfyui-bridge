@@ -271,6 +271,7 @@ body {
   padding-bottom: calc(12px + env(safe-area-inset-bottom));
   border-top: 1px solid var(--line-soft);
   background: #15161d;
+  max-height: 70vh; overflow-y: auto;
 }
 .composer-label { color: var(--text); font-size: .79rem; font-weight: 650; margin-bottom: 12px; }
 .composer-label span { color: var(--text-faint); font-weight: 400; margin-left: 8px; }
@@ -298,6 +299,10 @@ body {
 .workflow-controls .lora-row .row-gap > label { flex: 1; min-width: 80px; }
 .workflow-controls .lora-row input[type="checkbox"] { width: auto; height: auto; vertical-align: middle; }
 .workflow-controls > button { margin: 10px 8px 0 0; }
+.sampling-node { border: 1px solid var(--line-soft); border-radius: 8px; padding: 8px 10px; margin-top: 12px; min-width: 0; }
+.sampling-node legend { font-size: .76rem; color: var(--text-dim); padding: 0 5px; }
+.sampling-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
+.sampling-fields label { min-width: 0; }
 
 .toggle-label {
   display: inline-flex; align-items: center; gap: 7px;
