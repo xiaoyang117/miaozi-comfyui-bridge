@@ -160,7 +160,8 @@ class LLMClient:
     def generate_prompt(self, user_input: str, history_text: str = "",
                         context: str = "", specific: bool = False,
                         custom_system: str = "",
-                        include_description: bool = False) -> str | GeneratedPrompt:
+                        include_description: bool = False,
+                        nsfw_enabled: bool | None = None) -> str | GeneratedPrompt:
         """生成提示词，可同时返回中文说明。context 是角色库参考资料。"""
         if context:
             template = P.PROMPT_WITH_CONTEXT_SPECIFIC if specific else P.PROMPT_WITH_CONTEXT
@@ -175,6 +176,8 @@ class LLMClient:
             if history_text:
                 body = P.HISTORY_WRAPPER.format(
                     history=history_text, current=user_input)
+        if nsfw_enabled is not None:
+            template += "\n" + (P.NSFW_ENABLED if nsfw_enabled else P.NSFW_DISABLED)
         if include_description:
             template = template.replace(P.PROMPT_ONLY_OUTPUT, "").rstrip()
             template += "\n" + P.PROMPT_WITH_DESCRIPTION_OUTPUT

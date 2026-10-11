@@ -8,15 +8,19 @@
 
 import base64
 import glob as globmod
+import hashlib
+import ipaddress
 import json
 import os
 import re
 import threading
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from flask import (Flask, Response, jsonify, render_template, request,
+from flask import (Flask, Response, abort, g, jsonify, render_template, request,
                    send_from_directory)
+from itsdangerous import BadSignature, URLSafeTimedSerializer
 from werkzeug.exceptions import HTTPException
 
 from character_lookup import (direct_candidates, find_candidates,
@@ -62,16 +66,55 @@ def _guard():
     if not password:
         return None
     path = request.path
-    if path in ("/api/auth",) or any(path.startswith(p) for p in _OPEN_PATHS):
+    if path in ("/", "/api/auth") or any(path.startswith(p) for p in _OPEN_PATHS):
         return None
     given = (request.headers.get("X-Access-Password")
              or request.args.get("pw") or "")
-    if given != password:
+    if given == password:
+        return None
+    try:
+        valid = URLSafeTimedSerializer(password, salt="miaozi-access").loads(
+            request.cookies.get("mz_access", ""), max_age=7 * 24 * 3600) is True
+    except BadSignature:
+        valid = False
+    if not valid:
         return jsonify({"error": "口令错误", "need_auth": True}), 401
+    if request.method not in ("GET", "HEAD"):
+        origin = request.headers.get("Origin")
+        if ((origin and urlsplit(origin).netloc != request.host)
+                or request.headers.get("Sec-Fetch-Site") == "cross-site"):
+            return jsonify({"error": "不允许跨站修改"}), 403
     return None
 
 
+@app.after_request
+def _access_cookie(response):
+    if settings.access_password and g.get("refresh_access_cookie", False):
+        token = URLSafeTimedSerializer(
+            settings.access_password, salt="miaozi-access").dumps(True)
+        response.set_cookie("mz_access", token, max_age=7 * 24 * 3600,
+                            httponly=True, samesite="Strict", secure=request.is_secure)
+    if request.path.startswith(("/api/", "/outputs/")):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 # ---------------------------------------------------------------- 工具
+
+def _visitor_ip() -> str:
+    try:
+        address = ipaddress.ip_address(request.remote_addr or "")
+    except ValueError:
+        abort(400, description="无法识别访问 IP")
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    return "127.0.0.1" if address.is_loopback else address.compressed
+
+
+def _require_session(session_id: str, owner_ip: str) -> None:
+    if not store.session_exists(session_id, owner_ip):
+        abort(404, description="会话不存在")
+
 
 def _make_llm(**overrides) -> LLMClient:
     cfg = {
@@ -97,18 +140,36 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def _public_settings() -> dict:
+def _public_settings(owner_ip: str = "127.0.0.1") -> dict:
     """给前端看的配置，剥掉口令这类不该下发到浏览器的东西。
 
     访问口令只回一个布尔值 auth_required，前端据此决定是否弹口令框。
     """
     data = settings.get_all()
     data.pop("access_password", None)
+    controls = data.get("workflow_controls") or {}
+    data["workflow_controls"] = {
+        **(controls if isinstance(controls, dict) else {}),
+        **store.get_preferences(owner_ip)["workflow_controls"],
+    }
     data["auth_required"] = bool(settings.access_password)
     return data
 
 
-def _save_data_url(data_url: str, prefix: str = "") -> str:
+def _output_prefix(owner_ip: str) -> str:
+    return hashlib.sha256(owner_ip.encode("utf-8")).hexdigest()[:32] + "_"
+
+
+def _owns_output(filename: str, owner_ip: str) -> bool:
+    if "/" in filename or "\\" in filename:
+        return False
+    if re.match(r"^[0-9a-f]{32}_", filename):
+        return filename.startswith(_output_prefix(owner_ip))
+    return owner_ip == "127.0.0.1"
+
+
+def _save_data_url(data_url: str, prefix: str = "",
+                   owner_ip: str = "127.0.0.1") -> str:
     """把引擎回传的图片存到 outputs/，返回对外路径。"""
     if not data_url:
         return ""
@@ -123,20 +184,20 @@ def _save_data_url(data_url: str, prefix: str = "") -> str:
         sub = header.split("image/", 1)[1].split(";")[0].strip().lower()
         ext = "." + (sub if sub in ("jpeg", "jpg", "webp", "gif", "bmp")
                      else "png")
-    name = f"{prefix}{uuid.uuid4().hex[:20]}{ext}"
+    name = f"{_output_prefix(owner_ip)}{prefix}{uuid.uuid4().hex[:20]}{ext}"
     try:
         (OUTPUT_DIR / name).write_bytes(base64.b64decode(b64))
     except Exception:
         return ""
-    _prune_outputs()
+    _prune_outputs(owner_ip)
     return f"/outputs/{name}"
 
 
 _prune_lock = threading.Lock()
 
 
-def _prune_outputs() -> None:
-    """只保留最近 keep_outputs 张图，防止磁盘被慢慢填满。"""
+def _prune_outputs(owner_ip: str = "127.0.0.1") -> None:
+    """每个 IP 只保留最近 keep_outputs 张图。"""
     keep = settings.get("keep_outputs")
     try:
         keep = int(keep)
@@ -148,7 +209,8 @@ def _prune_outputs() -> None:
         return
     try:
         files = [p for p in OUTPUT_DIR.iterdir()
-                 if p.is_file() and p.suffix.lower() in ALLOWED_IMAGE_EXT]
+                 if p.is_file() and p.suffix.lower() in ALLOWED_IMAGE_EXT
+                 and _owns_output(p.name, owner_ip)]
         if len(files) <= keep:
             return
         files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
@@ -181,6 +243,8 @@ def index():
 
 @app.route("/outputs/<path:filename>")
 def serve_output(filename):
+    if not _owns_output(filename, _visitor_ip()):
+        abort(404)
     return send_from_directory(OUTPUT_DIR, filename)
 
 
@@ -191,6 +255,8 @@ def api_auth():
     if not password:
         return jsonify({"success": True, "need_auth": False})
     ok = data.get("password") == password
+    if ok:
+        g.refresh_access_cookie = True
     return jsonify({"success": ok, "need_auth": True}), (200 if ok else 401)
 
 
@@ -199,12 +265,15 @@ def api_auth():
 @app.route("/api/bootstrap")
 def api_bootstrap():
     """一次性把前端需要的所有状态取回去，减少来回请求。"""
+    owner_ip = _visitor_ip()
     return jsonify({
         "success": True,
-        "settings": _public_settings(),
+        "settings": _public_settings(owner_ip),
         "engine": engine.status(),
         "character_db": char_db_built(),
-        "sessions": store.list_sessions(limit=30),
+        "client_ip": owner_ip,
+        "preferences": store.get_preferences(owner_ip),
+        "sessions": store.list_sessions(limit=30, owner_ip=owner_ip),
     })
 
 
@@ -213,12 +282,27 @@ def api_bootstrap():
 @app.route("/api/settings", methods=["GET", "POST"])
 def api_settings():
     if request.method == "GET":
-        return jsonify({"success": True, "settings": _public_settings()})
+        return jsonify({"success": True, "settings": _public_settings(_visitor_ip())})
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({"error": "无效的配置数据"}), 400
     settings.update(data)
-    return jsonify({"success": True, "settings": _public_settings()})
+    if data.get("access_password"):
+        g.refresh_access_cookie = True
+    return jsonify({"success": True, "settings": _public_settings(_visitor_ip())})
+
+
+@app.route("/api/preferences", methods=["GET", "POST"])
+def api_preferences():
+    owner_ip = _visitor_ip()
+    if request.method == "GET":
+        return jsonify({"success": True, "preferences": store.get_preferences(owner_ip)})
+    try:
+        preferences = store.update_preferences(owner_ip, request.get_json(silent=True))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"success": True, "preferences": preferences,
+                    "settings": _public_settings(owner_ip)})
 
 
 @app.route("/api/plugins")
@@ -277,35 +361,42 @@ def api_engine_restart():
 
 @app.route("/api/sessions", methods=["GET", "POST"])
 def api_sessions():
+    owner_ip = _visitor_ip()
     if request.method == "POST":
         data = request.get_json(silent=True) or {}
         return jsonify({"success": True,
-                        "session": store.create_session(data.get("title", ""))})
-    return jsonify({"success": True, "sessions": store.list_sessions(limit=50)})
+                        "session": store.create_session(data.get("title", ""), owner_ip)})
+    return jsonify({"success": True,
+                    "sessions": store.list_sessions(limit=50, owner_ip=owner_ip)})
 
 
 @app.route("/api/sessions/<session_id>", methods=["GET", "DELETE", "PATCH"])
 def api_session(session_id):
+    owner_ip = _visitor_ip()
+    _require_session(session_id, owner_ip)
     if request.method == "DELETE":
-        store.delete_session(session_id)
+        store.delete_session(session_id, owner_ip)
         return jsonify({"success": True})
     if request.method == "PATCH":
         data = request.get_json(silent=True) or {}
-        store.rename_session(session_id, data.get("title", "新对话"))
+        store.rename_session(session_id, data.get("title", "新对话"), owner_ip)
         return jsonify({"success": True})
     return jsonify({"success": True,
-                    "messages": store.list_messages(session_id)})
+                    "messages": store.list_messages(session_id, owner_ip=owner_ip)})
 
 
 @app.route("/api/sessions/<session_id>/clear", methods=["POST"])
 def api_session_clear(session_id):
-    store.clear_messages(session_id)
+    owner_ip = _visitor_ip()
+    _require_session(session_id, owner_ip)
+    store.clear_messages(session_id, owner_ip)
     return jsonify({"success": True})
 
 
 @app.route("/api/messages/<int:message_id>", methods=["DELETE"])
 def api_message_delete(message_id):
-    store.delete_message(message_id)
+    if not store.delete_message(message_id, _visitor_ip()):
+        abort(404, description="消息不存在")
     return jsonify({"success": True})
 
 
@@ -392,12 +483,14 @@ def _references_multiple_previous_characters(prompt: str) -> bool:
 
 
 def _previous_characters(prompt: str, session_id: str,
-                         use_history: bool) -> list[dict]:
+                         use_history: bool, owner_ip: str = "127.0.0.1") -> list[dict]:
     if not use_history or not session_id or not _references_previous_character(prompt):
         return []
-    ids = store.last_assistant_character_ids(session_id)
+    ids = store.last_assistant_character_ids(session_id, owner_ip)
     if not ids:
-        single = store.last_assistant_character_id(session_id)
+        single = (store.last_assistant_character_id(session_id)
+                  if owner_ip == "127.0.0.1"
+                  else store.last_assistant_character_id(session_id, owner_ip))
         ids = [single] if single else []
     if len(ids) > 1 and not _references_multiple_previous_characters(prompt):
         return []
@@ -426,7 +519,7 @@ def _character_group(query: str, candidates: list,
 
 
 def _resolve_character(prompt: str, session_id: str = "",
-                       use_history: bool = True) -> dict:
+                       use_history: bool = True, owner_ip: str = "127.0.0.1") -> dict:
     direct = direct_candidates(prompt, limit=20)
     if direct:
         queries = [(prompt, direct)]
@@ -459,14 +552,14 @@ def _resolve_character(prompt: str, session_id: str = "",
     if not groups or re.search(r"和|与|跟|一起|旁边|身旁|alongside|together with",
                                prompt, re.IGNORECASE):
         existing = {c["character"] for group in groups for c in group["candidates"]}
-        for previous in _previous_characters(prompt, session_id, use_history):
+        for previous in _previous_characters(prompt, session_id, use_history, owner_ip):
             if previous["character"] not in existing and len(groups) < MAX_CHARACTERS:
                 groups.append(_character_group(previous["name"], [previous], "history"))
                 existing.add(previous["character"])
     if not groups:
         if (use_history and session_id and _references_previous_character(prompt)
                 and not _references_multiple_previous_characters(prompt)
-                and len(store.last_assistant_character_ids(session_id)) > 1):
+                and len(store.last_assistant_character_ids(session_id, owner_ip)) > 1):
             return {"status": "ambiguous_reference",
                     "message": "上一轮有多位角色，请写明要修改哪位角色",
                     "groups": [], "candidates": []}
@@ -486,6 +579,10 @@ def _resolve_character(prompt: str, session_id: str = "",
 @app.route("/api/characters/resolve", methods=["POST"])
 def api_resolve_character():
     data = request.get_json(silent=True) or {}
+    owner_ip = _visitor_ip()
+    session_id = str(data.get("session_id") or "")
+    if session_id:
+        _require_session(session_id, owner_ip)
     if not settings.get("use_character_db", True) or not data.get("use_search", True):
         return jsonify({"status": "disabled", "message": "角色库检索已关闭", "candidates": []})
     if not char_db_built():
@@ -495,8 +592,7 @@ def api_resolve_character():
         return jsonify({"error": "请输入图片描述"}), 400
     try:
         return jsonify(_resolve_character(
-            prompt, str(data.get("session_id") or ""),
-            bool(data.get("use_history", True))))
+            prompt, session_id, bool(data.get("use_history", True)), owner_ip))
     except Exception as e:
         return jsonify({"error": f"角色检索失败：{e}"}), 500
 
@@ -556,6 +652,7 @@ def api_loras():
 
 @app.route("/api/generate", methods=["POST"])
 def api_generate():
+    owner_ip = _visitor_ip()
     if not _gen_lock.acquire(blocking=False):
         return jsonify({"queue": True}), 200
 
@@ -563,7 +660,7 @@ def api_generate():
 
     def stream():
         try:
-            yield from _run_generation(payload)
+            yield from _run_generation(payload, owner_ip)
         except Exception as e:  # noqa: BLE001  任何异常都要能吐回前端
             yield _sse({"step": "error", "error": str(e)})
         finally:
@@ -574,17 +671,18 @@ def api_generate():
                              "X-Accel-Buffering": "no"})
 
 
-def _run_generation(payload: dict):
+def _run_generation(payload: dict, owner_ip: str = "127.0.0.1"):
     if "regenerate_message_id" in payload:
-        yield from _run_regeneration(payload)
+        yield from _run_regeneration(payload, owner_ip)
         return
 
     user_input = (payload.get("prompt") or "").strip()
     if not user_input:
         yield _sse({"step": "error", "error": "请输入图片描述"})
         return
+    nsfw_enabled = _nsfw_mode(payload, owner_ip)
 
-    session_id = store.ensure_session(payload.get("session_id") or "")
+    session_id = store.ensure_session(payload.get("session_id") or "", owner_ip)
     use_character = bool(payload.get("use_search", True)) and settings.get("use_character_db", True)
     specific = bool(payload.get("specific", False))
     use_history = bool(payload.get("use_history", True))
@@ -594,7 +692,7 @@ def _run_generation(payload: dict):
                     "error": "没有找到工作流文件。请在配置页设置工作流路径"})
         return
     try:
-        controls = _workflow_controls(workflow_path, payload)
+        controls = _workflow_controls(workflow_path, payload, owner_ip)
     except ValueError as e:
         yield _sse({"step": "error", "error": str(e)})
         return
@@ -658,7 +756,7 @@ def _run_generation(payload: dict):
                         character_status += f"；另有 {missing} 位角色未命中"
                     inherited = payload.get("inherited_character_ids")
                     if use_history and isinstance(inherited, list):
-                        previous_ids = set(store.last_assistant_character_ids(session_id))
+                        previous_ids = set(store.last_assistant_character_ids(session_id, owner_ip))
                         inherited_ids = {
                             value for value in inherited
                             if isinstance(value, str) and value in previous_ids
@@ -672,7 +770,7 @@ def _run_generation(payload: dict):
                         "error": "角色检索失败，已跳过",
                     }.get(payload.get("character_reason"), "未找到可用的角色特征")
             else:
-                resolved = _resolve_character(user_input, session_id, use_history)
+                resolved = _resolve_character(user_input, session_id, use_history, owner_ip)
                 character_status = resolved["message"]
                 seen = set()
                 for group in resolved["groups"]:
@@ -702,7 +800,8 @@ def _run_generation(payload: dict):
     history_text = ""
     if use_history and settings.history_rounds > 0:
         history_text = build_history_text(
-            store.context_pairs(session_id, settings.history_rounds))
+            store.context_pairs(session_id, settings.history_rounds, owner_ip,
+                                include_nsfw=nsfw_enabled))
     prompt_data = plugins.run("before_prompt", {
         "user_input": user_input_full,
         "history_text": history_text,
@@ -719,6 +818,7 @@ def _run_generation(payload: dict):
             specific=prompt_data["specific"],
             custom_system=prompt_data["custom_system"],
             include_description=True,
+            nsfw_enabled=nsfw_enabled,
         )
         if isinstance(generated_prompt, str):
             generated_prompt = parse_generated_prompt(generated_prompt)
@@ -744,7 +844,7 @@ def _run_generation(payload: dict):
     resize = payload.get("preset_index") != -1
     generated = yield from _generate_image(prompt, workflow_path, width, height,
                                            controls=controls, resize=resize,
-                                           description=description)
+                                           description=description, owner_ip=owner_ip)
     if generated is None:
         return
     result, image_url, description = generated
@@ -752,12 +852,14 @@ def _run_generation(payload: dict):
 
     # ---------- 4. 落库 ----------
     store.add_message(session_id, "user", content=user_input,
-                      vlm=vlm_text,
+                      vlm=vlm_text, owner_ip=owner_ip,
                       meta={"has_image": bool(images),
-                            "image_count": len(images)})
+                            "image_count": len(images),
+                            "nsfw_enabled": nsfw_enabled})
     store.add_message(session_id, "assistant", content=prompt,
-                      image=image_url, character=character_info,
+                      image=image_url, character=character_info, owner_ip=owner_ip,
                       meta={"width": width, "height": height,
+                            "nsfw_enabled": nsfw_enabled,
                             "description": description,
                             "workflow_path": workflow_path,
                             "workflow_controls": controls,
@@ -770,18 +872,19 @@ def _run_generation(payload: dict):
 
     yield _sse({"step": "done", "image": image_url, "prompt": prompt,
                 "description": description,
+                "nsfw_enabled": nsfw_enabled,
                 "character": character_info, "vlm": vlm_text,
                 "session_id": session_id})
 
 
-def _run_regeneration(payload: dict):
+def _run_regeneration(payload: dict, owner_ip: str = "127.0.0.1"):
     session_id = payload.get("session_id")
     message_id = payload.get("regenerate_message_id")
     if (not isinstance(session_id, str) or not session_id
             or type(message_id) is not int):
         yield _sse({"step": "error", "error": "请选择要再次生成的图片"})
         return
-    source = store.get_message(session_id, message_id)
+    source = store.get_message(session_id, message_id, owner_ip)
     if (source is None or source["role"] != "assistant"
             or not source["image"] or not source["content"].strip()):
         yield _sse({"step": "error", "error": "原生成记录不存在或没有可用提示词"})
@@ -789,6 +892,10 @@ def _run_regeneration(payload: dict):
 
     prompt = source["content"]
     meta = source["meta"]
+    nsfw_enabled = _nsfw_mode(payload, owner_ip)
+    if meta.get("nsfw_enabled") is True and not nsfw_enabled:
+        yield _sse({"step": "error", "error": "原图使用 NSFW 模式，请先开启 NSFW 再次生成"})
+        return
     description = meta.get("description", "")
     if not isinstance(description, str):
         description = ""
@@ -803,23 +910,24 @@ def _run_regeneration(payload: dict):
     height = meta.get("height") or default_height
     try:
         controls = (meta.get("workflow_controls") if isinstance(meta.get("workflow_controls"), dict)
-                    else _workflow_controls(workflow_path, payload))
+                    else _workflow_controls(workflow_path, payload, owner_ip))
     except ValueError as e:
         yield _sse({"step": "error", "error": str(e)})
         return
     resize = meta.get("resize", True)
     generated = yield from _generate_image(
         prompt, workflow_path, width, height, randomize_seed=True,
-        controls=controls, resize=resize, description=description)
+        controls=controls, resize=resize, description=description, owner_ip=owner_ip)
     if generated is None:
         return
     result, image_url, description = generated
     width, height = result.get("base_size") or (width, height)
     store.add_message(session_id, "assistant", content=prompt,
-                      image=image_url, character=source["character"],
+                      image=image_url, character=source["character"], owner_ip=owner_ip,
                       vlm=source["vlm"],
                       meta={**meta, "width": width, "height": height,
                             "description": description,
+                            "nsfw_enabled": meta.get("nsfw_enabled") is True,
                             "workflow_path": workflow_path,
                             "workflow_controls": controls, "resize": resize,
                             "elapsed": result.get("elapsed"),
@@ -827,13 +935,24 @@ def _run_regeneration(payload: dict):
                             "character_status": "再次生成：复用提示词，未调用 LLM"})
     yield _sse({"step": "done", "image": image_url, "prompt": prompt,
                 "description": description,
+                "nsfw_enabled": meta.get("nsfw_enabled") is True,
                 "session_id": session_id})
 
 
-def _workflow_controls(workflow_path: str, payload: dict) -> dict:
+def _nsfw_mode(payload: dict, owner_ip: str) -> bool:
+    if "nsfw_enabled" in payload:
+        if type(payload["nsfw_enabled"]) is not bool:
+            raise ValueError("NSFW 开关必须为布尔值")
+        return payload["nsfw_enabled"]
+    return store.get_preferences(owner_ip)["nsfw_enabled"]
+
+
+def _workflow_controls(workflow_path: str, payload: dict,
+                       owner_ip: str = "127.0.0.1") -> dict:
     saved = settings.get("workflow_controls") or {}
     if not isinstance(saved, dict):
         saved = {}
+    saved = {**saved, **store.get_preferences(owner_ip)["workflow_controls"]}
     controls = payload.get("workflow_controls", saved.get(workflow_path) or {})
     if not isinstance(controls, dict):
         raise ValueError("工作流参数格式不正确")
@@ -842,7 +961,8 @@ def _workflow_controls(workflow_path: str, payload: dict) -> dict:
 
 def _generate_image(prompt: str, workflow_path: str, width: int, height: int,
                     randomize_seed: bool = False, controls: dict = None,
-                    resize: bool = True, description: str = ""):
+                    resize: bool = True, description: str = "",
+                    owner_ip: str = "127.0.0.1"):
     yield _sse({"step": "comfyui"})
     try:
         replacements = settings.build_replacements(prompt, width, height)
@@ -871,7 +991,8 @@ def _generate_image(prompt: str, workflow_path: str, width: int, height: int,
         })
         result["image"] = output["image"]
         description = output["description"]
-    image_url = _save_data_url(result["image"], prefix="gen_") if result.get("image") else ""
+    image_url = (_save_data_url(result["image"], prefix="gen_", owner_ip=owner_ip)
+                 if result.get("image") else "")
     if not image_url:
         yield _sse({"step": "error",
                     "error": result.get("error")

@@ -55,7 +55,8 @@
     <div id="panel-chat" class="panel active">
       <div class="chat-stage">
         <div class="canvas-heading">
-          <div><span class="eyebrow">当前创作</span><h1 id="activeSessionTitle">新对话</h1></div>
+          <div><span class="eyebrow">当前创作</span><h1 id="activeSessionTitle">新对话</h1>
+            <small id="visitorSpace" class="dim"></small></div>
           <button id="panelControlsButton" class="btn-secondary" type="button"
                   aria-controls="controlPanel" aria-expanded="false" onclick="toggleControls()">生成参数</button>
         </div>
@@ -98,6 +99,11 @@
             <input type="checkbox" id="useSpecific">
             <span class="toggle-slider"></span>
             精细还原
+          </label>
+          <label class="toggle-label" title="允许按描述生成成人题材提示词，按访问 IP 保存">
+            <input type="checkbox" id="useNsfw" onchange="saveNsfwPreference()">
+            <span class="toggle-slider"></span>
+            NSFW
           </label>
         </div>
         <div class="chat-input-row">
@@ -291,6 +297,7 @@
 
       <div class="settings-group">
         <h3>访问保护</h3>
+        <p class="hint">会话、图片、NSFW 和保存的创作参数按 IP 区分；连接配置和插件为所有访问者共用。</p>
         <label>访问口令（留空则不校验）</label>
         <input id="s_access_password" type="password" autocomplete="new-password"
                placeholder="留空表示不修改">
@@ -338,6 +345,7 @@
 // ==================== 全局状态 ====================
 let S = {
   settings: {},
+  preferences: {},
   engine: {},
   sessions: [],
   currentSession: '',
@@ -582,6 +590,9 @@ async function loadBootstrap() {
     if (r.status !== 200) return;
     const d = await r.json();
     S.settings = d.settings || {};
+    S.preferences = d.preferences || {};
+    $('useNsfw').checked = S.preferences.nsfw_enabled === true;
+    $('visitorSpace').textContent = 'IP 创作空间：' + (d.client_ip || '');
     S.engine = d.engine || {};
     S.sessions = d.sessions || [];
     renderSettings();
@@ -597,6 +608,25 @@ async function loadBootstrap() {
     }
   } catch (e) {
     console.warn('bootstrap 失败', e);
+  }
+}
+
+async function saveNsfwPreference() {
+  const toggle = $('useNsfw');
+  const previous = S.preferences.nsfw_enabled === true;
+  toggle.disabled = true;
+  try {
+    const response = await api('/api/preferences', {
+      method: 'POST', body: {nsfw_enabled: toggle.checked},
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.error || '保存失败');
+    S.preferences = data.preferences;
+  } catch (e) {
+    toggle.checked = previous;
+    showModal('保存 NSFW 开关失败：' + e.message);
+  } finally {
+    toggle.disabled = false;
   }
 }
 
@@ -762,6 +792,12 @@ function renderMessage(m) {
       }
     }
   } else {
+    if (m.meta && m.meta.nsfw_enabled === true) {
+      const badge = document.createElement('div');
+      badge.className = 'dim';
+      badge.textContent = 'NSFW 模式';
+      div.appendChild(badge);
+    }
     const description = m.meta && typeof m.meta.description === 'string'
       ? m.meta.description.trim() : '';
     if (m.meta && m.meta.character_status) {
@@ -1273,14 +1309,15 @@ async function saveWorkflowControls() {
     return showError('请先等工作流节点读取完成');
   }
   try {
-    const updated = {...(S.settings.workflow_controls || {}),
+    const updated = {...(S.preferences.workflow_controls || {}),
                      [path]: currentWorkflowControls()};
-    const response = await api('/api/settings', {
+    const response = await api('/api/preferences', {
       method: 'POST', body: {workflow_controls: updated},
     });
     const data = await response.json();
     if (!response.ok || !data.success) throw new Error(data.error || '保存失败');
     S.settings = data.settings;
+    S.preferences = data.preferences;
     showModal('此工作流参数已保存', 'success');
   } catch (e) { showError('保存工作流参数失败：' + e.message); }
 }
@@ -1295,6 +1332,7 @@ function hideStep() { $('stepIndicator').classList.add('hidden'); }
 
 async function sendMessage(regenerate = null) {
   if (isGenerating) return;
+  if ($('useNsfw').disabled) return showModal('正在保存 NSFW 开关，请稍后再生成');
   const input = $('chatInput');
   const text = regenerate ? '' : input.value.trim();
   if (!regenerate && !text) return;
@@ -1325,12 +1363,14 @@ async function sendMessage(regenerate = null) {
       session_id: regenerate.session_id,
       workflow_path: $('chat_workflow').value || S.settings.workflow_path,
       preset_index: parseInt($('chat_preset').value, 10),
+      nsfw_enabled: $('useNsfw').checked,
     } : {
       prompt: text,
       session_id: S.currentSession,
       use_search: $('useSearch').checked,
       use_history: $('useHistory').checked,
       specific: $('useSpecific').checked,
+      nsfw_enabled: $('useNsfw').checked,
       workflow_path: $('chat_workflow').value || S.settings.workflow_path,
       preset_index: parseInt($('chat_preset').value, 10),
       images: images,
@@ -1690,7 +1730,18 @@ setInterval(async () => {
 
 // 启动：需要口令时 api() 会弹出口令门
 renderEmptyHint();
-loadBootstrap();
+async function startApp() {
+  if (accessPassword) {
+    try {
+      await fetch('/api/auth', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({password: accessPassword}),
+      });
+    } catch (e) { /* bootstrap 会显示连接或口令问题 */ }
+  }
+  await loadBootstrap();
+}
+startApp();
 </script>
 </body>
 </html>
