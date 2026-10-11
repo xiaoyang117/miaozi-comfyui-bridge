@@ -1,8 +1,4 @@
-"""会话与消息持久化（SQLite）。
-
-比原来存在浏览器 localStorage 的做法好在：换设备、换浏览器、刷新页面
-都能看到同一份历史，而且服务端生成提示词时可以直接读到上下文。
-"""
+"""按访问 IP 保存会话、消息与创作偏好（SQLite）。"""
 
 import json
 import os
@@ -20,6 +16,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     id         TEXT PRIMARY KEY,
     title      TEXT NOT NULL DEFAULT '',
+    owner_ip   TEXT NOT NULL DEFAULT '127.0.0.1',
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -36,6 +33,11 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_msg_session ON messages(session_id, id);
 CREATE INDEX IF NOT EXISTS idx_session_updated ON sessions(updated_at DESC);
+CREATE TABLE IF NOT EXISTS client_preferences (
+    owner_ip          TEXT PRIMARY KEY,
+    nsfw_enabled      INTEGER NOT NULL DEFAULT 0,
+    workflow_controls TEXT NOT NULL DEFAULT '{}'
+);
 """
 
 
@@ -50,6 +52,14 @@ class Store:
         self._lock = threading.RLock()
         with self._conn() as conn:
             conn.executescript(SCHEMA)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
+            if "owner_ip" not in columns:
+                conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN owner_ip TEXT "
+                    "NOT NULL DEFAULT '127.0.0.1'")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_session_owner "
+                "ON sessions(owner_ip, updated_at DESC)")
             conn.commit()
 
     def _conn(self) -> sqlite3.Connection:
@@ -60,59 +70,109 @@ class Store:
         conn.execute("PRAGMA synchronous = NORMAL")
         return conn
 
+    def get_preferences(self, owner_ip: str = "127.0.0.1") -> dict:
+        with self._lock, self._conn() as conn:
+            row = conn.execute(
+                "SELECT nsfw_enabled, workflow_controls FROM client_preferences "
+                "WHERE owner_ip = ?", (owner_ip,)).fetchone()
+        if row is None:
+            return {"nsfw_enabled": False, "workflow_controls": {}}
+        try:
+            controls = json.loads(row["workflow_controls"])
+        except (ValueError, TypeError):
+            controls = {}
+        return {"nsfw_enabled": bool(row["nsfw_enabled"]),
+                "workflow_controls": controls if isinstance(controls, dict) else {}}
+
+    def update_preferences(self, owner_ip: str, data: dict) -> dict:
+        if not isinstance(data, dict):
+            raise ValueError("创作偏好格式不正确")
+        if "nsfw_enabled" in data and type(data["nsfw_enabled"]) is not bool:
+            raise ValueError("NSFW 开关必须为布尔值")
+        if "workflow_controls" in data:
+            controls = data["workflow_controls"]
+            if (not isinstance(controls, dict)
+                    or any(not isinstance(value, dict) for value in controls.values())):
+                raise ValueError("工作流参数格式不正确")
+        with self._lock, self._conn() as conn:
+            preferences = self.get_preferences(owner_ip)
+            for key in preferences:
+                if key in data:
+                    preferences[key] = data[key]
+            conn.execute(
+                "INSERT INTO client_preferences(owner_ip, nsfw_enabled, workflow_controls) "
+                "VALUES (?,?,?) ON CONFLICT(owner_ip) DO UPDATE SET "
+                "nsfw_enabled=excluded.nsfw_enabled, workflow_controls=excluded.workflow_controls",
+                (owner_ip, int(preferences["nsfw_enabled"]),
+                 json.dumps(preferences["workflow_controls"], ensure_ascii=False)))
+            conn.commit()
+        return preferences
+
     # ---------- 会话 ----------
 
-    def list_sessions(self, limit: int = 50) -> list:
+    def list_sessions(self, limit: int = 50, owner_ip: str = "127.0.0.1") -> list:
         with self._lock, self._conn() as conn:
             rows = conn.execute(
                 "SELECT s.id, s.title, s.created_at, s.updated_at, "
                 "(SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS n "
-                "FROM sessions s ORDER BY s.updated_at DESC LIMIT ?",
-                (limit,)).fetchall()
+                "FROM sessions s WHERE s.owner_ip = ? "
+                "ORDER BY s.updated_at DESC LIMIT ?",
+                (owner_ip, limit)).fetchall()
         return [dict(r) for r in rows]
 
-    def create_session(self, title: str = "") -> dict:
+    def create_session(self, title: str = "", owner_ip: str = "127.0.0.1") -> dict:
         sid = uuid.uuid4().hex[:16]
         ts = _now()
         with self._lock, self._conn() as conn:
             conn.execute(
-                "INSERT INTO sessions(id, title, created_at, updated_at) "
-                "VALUES (?,?,?,?)", (sid, title or "新对话", ts, ts))
+                "INSERT INTO sessions(id, title, owner_ip, created_at, updated_at) "
+                "VALUES (?,?,?,?,?)", (sid, title or "新对话", owner_ip, ts, ts))
             conn.commit()
         return {"id": sid, "title": title or "新对话",
                 "created_at": ts, "updated_at": ts, "n": 0}
 
-    def session_exists(self, session_id: str) -> bool:
+    def session_exists(self, session_id: str, owner_ip: str = "127.0.0.1") -> bool:
         with self._lock, self._conn() as conn:
-            row = conn.execute("SELECT 1 FROM sessions WHERE id = ?",
-                               (session_id,)).fetchone()
+            row = conn.execute("SELECT 1 FROM sessions WHERE id = ? AND owner_ip = ?",
+                               (session_id, owner_ip)).fetchone()
         return row is not None
 
-    def ensure_session(self, session_id: str) -> str:
-        if session_id and self.session_exists(session_id):
+    def ensure_session(self, session_id: str, owner_ip: str = "127.0.0.1") -> str:
+        if session_id:
+            if not self.session_exists(session_id, owner_ip):
+                raise ValueError("会话不存在")
             return session_id
-        return self.create_session()["id"]
+        return self.create_session(owner_ip=owner_ip)["id"]
 
-    def delete_session(self, session_id: str) -> None:
+    def delete_session(self, session_id: str, owner_ip: str = "127.0.0.1") -> None:
         with self._lock, self._conn() as conn:
-            conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-            conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            conn.execute(
+                "DELETE FROM messages WHERE session_id = ? AND session_id IN "
+                "(SELECT id FROM sessions WHERE owner_ip = ?)", (session_id, owner_ip))
+            conn.execute("DELETE FROM sessions WHERE id = ? AND owner_ip = ?",
+                         (session_id, owner_ip))
             conn.commit()
 
-    def rename_session(self, session_id: str, title: str) -> None:
+    def rename_session(self, session_id: str, title: str,
+                       owner_ip: str = "127.0.0.1") -> None:
         with self._lock, self._conn() as conn:
-            conn.execute("UPDATE sessions SET title = ? WHERE id = ?",
-                         (title[:80], session_id))
+            conn.execute("UPDATE sessions SET title = ? WHERE id = ? AND owner_ip = ?",
+                         (title[:80], session_id, owner_ip))
             conn.commit()
 
     # ---------- 消息 ----------
 
     def add_message(self, session_id: str, role: str, content: str = "",
                     image: str = "", character: str = "",
-                    vlm: str = "", meta: dict = None) -> int:
+                    vlm: str = "", meta: dict = None,
+                    owner_ip: str = "127.0.0.1") -> int:
         ts = _now()
         meta_json = json.dumps(meta or {}, ensure_ascii=False)
         with self._lock, self._conn() as conn:
+            if conn.execute(
+                    "SELECT 1 FROM sessions WHERE id = ? AND owner_ip = ?",
+                    (session_id, owner_ip)).fetchone() is None:
+                raise ValueError("会话不存在")
             cur = conn.execute(
                 "INSERT INTO messages(session_id, role, content, image, "
                 "character, vlm, meta, created_at) VALUES (?,?,?,?,?,?,?,?)",
@@ -132,26 +192,31 @@ class Store:
             conn.commit()
         return cur.lastrowid
 
-    def list_messages(self, session_id: str, limit: int = 500) -> list:
+    def list_messages(self, session_id: str, limit: int = 500,
+                      owner_ip: str = "127.0.0.1") -> list:
         with self._lock, self._conn() as conn:
             rows = conn.execute(
-                "SELECT * FROM messages WHERE session_id = ? "
-                "ORDER BY id DESC LIMIT ?", (session_id, limit)).fetchall()
+                "SELECT m.* FROM messages m JOIN sessions s ON s.id = m.session_id "
+                "WHERE m.session_id = ? AND s.owner_ip = ? "
+                "ORDER BY m.id DESC LIMIT ?", (session_id, owner_ip, limit)).fetchall()
         out = []
         for r in reversed(rows):
             item = dict(r)
             try:
-                item["meta"] = json.loads(item.get("meta") or "{}")
+                meta = json.loads(item.get("meta") or "{}")
             except Exception:
-                item["meta"] = {}
+                meta = {}
+            item["meta"] = meta if isinstance(meta, dict) else {}
             out.append(item)
         return out
 
-    def get_message(self, session_id: str, message_id: int) -> dict | None:
+    def get_message(self, session_id: str, message_id: int,
+                    owner_ip: str = "127.0.0.1") -> dict | None:
         with self._lock, self._conn() as conn:
             row = conn.execute(
-                "SELECT * FROM messages WHERE session_id = ? AND id = ?",
-                (session_id, message_id)).fetchone()
+                "SELECT m.* FROM messages m JOIN sessions s ON s.id = m.session_id "
+                "WHERE m.session_id = ? AND m.id = ? AND s.owner_ip = ?",
+                (session_id, message_id, owner_ip)).fetchone()
         if row is None:
             return None
         item = dict(row)
@@ -162,37 +227,46 @@ class Store:
         item["meta"] = meta if isinstance(meta, dict) else {}
         return item
 
-    def delete_message(self, message_id: int) -> None:
+    def delete_message(self, message_id: int, owner_ip: str = "127.0.0.1") -> bool:
         with self._lock, self._conn() as conn:
-            conn.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+            deleted = conn.execute(
+                "DELETE FROM messages WHERE id = ? AND session_id IN "
+                "(SELECT id FROM sessions WHERE owner_ip = ?)", (message_id, owner_ip))
+            conn.commit()
+        return deleted.rowcount > 0
+
+    def clear_messages(self, session_id: str, owner_ip: str = "127.0.0.1") -> None:
+        with self._lock, self._conn() as conn:
+            conn.execute(
+                "DELETE FROM messages WHERE session_id = ? AND session_id IN "
+                "(SELECT id FROM sessions WHERE owner_ip = ?)", (session_id, owner_ip))
             conn.commit()
 
-    def clear_messages(self, session_id: str) -> None:
-        with self._lock, self._conn() as conn:
-            conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-            conn.commit()
-
-    def context_pairs(self, session_id: str, rounds: int) -> list:
+    def context_pairs(self, session_id: str, rounds: int,
+                      owner_ip: str = "127.0.0.1", include_nsfw: bool = True) -> list:
         """取最近 N 轮的 (用户输入, 助手提示词) 用于拼上下文。"""
         if rounds <= 0:
             return []
-        msgs = self.list_messages(session_id)
+        msgs = self.list_messages(session_id, owner_ip=owner_ip)
         pairs = []
         pending_user = None
         for m in msgs:
             if m["role"] == "user":
                 pending_user = m["content"]
             elif m["role"] == "assistant" and pending_user is not None:
-                pairs.append((pending_user, m["content"]))
+                if include_nsfw or m["meta"].get("nsfw_enabled") is not True:
+                    pairs.append((pending_user, m["content"]))
                 pending_user = None
         return pairs[-rounds:]
 
-    def last_assistant_character_ids(self, session_id: str) -> list[str]:
+    def last_assistant_character_ids(self, session_id: str,
+                                     owner_ip: str = "127.0.0.1") -> list[str]:
         with self._lock, self._conn() as conn:
             row = conn.execute(
-                "SELECT meta, character FROM messages WHERE session_id = ? "
-                "AND role = 'assistant' ORDER BY id DESC LIMIT 1",
-                (session_id,)).fetchone()
+                "SELECT m.meta, m.character FROM messages m "
+                "JOIN sessions s ON s.id = m.session_id WHERE m.session_id = ? "
+                "AND m.role = 'assistant' AND s.owner_ip = ? ORDER BY m.id DESC LIMIT 1",
+                (session_id, owner_ip)).fetchone()
         if not row:
             return []
         try:
@@ -211,8 +285,9 @@ class Store:
             return [first_line.removeprefix("角色: ").strip()]
         return []
 
-    def last_assistant_character_id(self, session_id: str) -> str:
-        ids = self.last_assistant_character_ids(session_id)
+    def last_assistant_character_id(self, session_id: str,
+                                    owner_ip: str = "127.0.0.1") -> str:
+        ids = self.last_assistant_character_ids(session_id, owner_ip)
         return ids[0] if ids else ""
 
 
