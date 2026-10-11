@@ -595,6 +595,13 @@ function renderMessage(m) {
 
       const bar = document.createElement('div');
       bar.className = 'img-actions';
+      if (m.id && m.content) {
+        const regenerate = makeImgButton('再次生成', () => sendMessage(m));
+        regenerate.classList.add('btn-regenerate');
+        regenerate.title = '复用完整提示词，更换随机种子，跳过 LLM';
+        regenerate.disabled = isGenerating;
+        bar.appendChild(regenerate);
+      }
       bar.appendChild(makeImgButton('放大', () => showImageModal(m.image)));
       bar.appendChild(makeImgButton('复制图片', async (btn) => {
         try {
@@ -721,30 +728,36 @@ function setStep(key) {
 }
 function hideStep() { $('stepIndicator').classList.add('hidden'); }
 
-async function sendMessage() {
+async function sendMessage(regenerate = null) {
   if (isGenerating) return;
   const input = $('chatInput');
-  const text = input.value.trim();
-  if (!text) return;
+  const text = regenerate ? '' : input.value.trim();
+  if (!regenerate && !text) return;
 
   if (!S.currentSession) await newSession(false);
 
   isGenerating = true;
   const btn = $('chatSendBtn');
   btn.disabled = true;
-  btn.textContent = '生成中';
-  input.value = '';
+  btn.textContent = regenerate ? '再次生成中' : '生成中';
+  document.querySelectorAll('.btn-regenerate').forEach(b => { b.disabled = true; });
 
-  const images = selectedImages.slice();
-  const hadImage = images.length > 0;
-  removeImage();
-
-  // 立刻插入本地气泡，等服务端回执后再刷新
-  const temp = {role: 'user', content: text, meta: {has_image: hadImage, image_count: images.length}};
-  renderMessage(temp);
+  const images = regenerate ? [] : selectedImages.slice();
+  if (!regenerate) {
+    input.value = '';
+    removeImage();
+    // 立刻插入本地气泡，等服务端回执后再刷新
+    renderMessage({role: 'user', content: text,
+                   meta: {has_image: images.length > 0, image_count: images.length}});
+  }
 
   try {
-    const body = {
+    const body = regenerate ? {
+      regenerate_message_id: regenerate.id,
+      session_id: regenerate.session_id,
+      workflow_path: $('chat_workflow').value || S.settings.workflow_path,
+      preset_index: parseInt($('chat_preset').value, 10),
+    } : {
       prompt: text,
       session_id: S.currentSession,
       use_search: $('useSearch').checked,
@@ -755,7 +768,8 @@ async function sendMessage() {
       images: images,
     };
 
-    if (body.use_search) {
+    if (regenerate) setStep('comfyui');
+    if (!regenerate && body.use_search) {
       setStep('search');
       try {
         const resolvedResponse = await api('/api/characters/resolve', {
@@ -851,13 +865,16 @@ async function sendMessage() {
     refreshSessions();
   } catch (e) {
     hideStep();
-    document.querySelectorAll('#chatMessages .chat-bubble').forEach((el, i, arr) => {
-      if (i === arr.length - 1 && el.classList.contains('chat-user')) el.remove();
-    });
+    if (!regenerate) {
+      document.querySelectorAll('#chatMessages .chat-bubble').forEach((el, i, arr) => {
+        if (i === arr.length - 1 && el.classList.contains('chat-user')) el.remove();
+      });
+    }
     renderMessage({role: 'assistant', content: '错误：' + (e.message || '生成失败')});
     showModal('错误：' + (e.message || '生成失败'));
   } finally {
     isGenerating = false;
+    document.querySelectorAll('.btn-regenerate').forEach(b => { b.disabled = false; });
     btn.disabled = false;
     btn.innerHTML = '生成图片 <span aria-hidden="true">↗</span>';
   }

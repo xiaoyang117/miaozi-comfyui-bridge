@@ -147,6 +147,21 @@ class Store:
             out.append(item)
         return out
 
+    def get_message(self, session_id: str, message_id: int) -> dict | None:
+        with self._lock, self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM messages WHERE session_id = ? AND id = ?",
+                (session_id, message_id)).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        try:
+            meta = json.loads(item["meta"] or "{}")
+        except (ValueError, TypeError):
+            meta = {}
+        item["meta"] = meta if isinstance(meta, dict) else {}
+        return item
+
     def delete_message(self, message_id: int) -> None:
         with self._lock, self._conn() as conn:
             conn.execute("DELETE FROM messages WHERE id = ?", (message_id,))
