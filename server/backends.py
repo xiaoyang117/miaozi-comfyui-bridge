@@ -18,6 +18,7 @@ from pathlib import Path
 
 import requests
 
+from plugins import plugins
 from workflow_controls import apply_loras, apply_resolution, apply_second_pass, describe_workflow
 
 MIME_BY_EXT = {
@@ -274,6 +275,11 @@ class ComfyBackend:
                      if size_nodes else None)
         if job.get("randomize_seed"):
             self._randomize_seeds(workflow)
+        workflow = plugins.run("before_workflow", {
+            "workflow": workflow, "prompt": prompt,
+            "width": job.get("width"), "height": job.get("height"),
+            "is_regeneration": bool(job.get("randomize_seed")),
+        })["workflow"]
 
         timeout = float(job.get("timeout") or self.cfg.get("run_timeout") or 600)
         tmp_root = Path(tempfile.mkdtemp(prefix="miaozi_"))

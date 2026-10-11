@@ -99,6 +99,7 @@ python app.py
   不删除额外文件。被替换的旧文件保存在项目中的 `.miaozi-update-backups` 文件夹，
   需要恢复本地修改时可从中取回。
 - 两种方式都保留配置、会话、已生成图片、角色数据库和自己的额外工作流；
+  `server/data/plugins/` 中安装的插件及其启用设置也会保留；
   若修改了项目自带的工作流文件，ZIP 更新前的版本会在上述备份中。
   下载或解压失败不会覆盖现有文件。
 
@@ -115,6 +116,14 @@ python app.py
      `C:/Users/you/venv/Scripts/comfy.exe`
 3. 工作流路径留空会自动用项目 `workflows/` 目录里第一个 json
 4. 点保存。MCP 配置有改动的话，再点「本机引擎」里的**重启引擎**
+
+### 插件（可选）
+
+把可信插件的文件夹复制到 `server/data/plugins/`，在网站「插件」页重新扫描、
+启用并配置。插件可参与 LLM 提示词、ComfyUI 工作流、出图结果，
+还可提供独立的 API 与网页面板；没有插件时原流程照常工作。
+插件默认关闭，卸载或更新前先停用。完整格式和可运行示例见
+[插件开发说明](docs/plugins.md) 和 `examples/plugins/prompt_suffix/`。
 
 ### 角色特征库（可选）
 
