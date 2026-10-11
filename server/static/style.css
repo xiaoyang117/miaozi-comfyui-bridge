@@ -203,6 +203,15 @@ body {
 .chat-user { align-self: flex-end; background: #533943; color: var(--text); border: 1px solid #79515b; border-bottom-right-radius: 4px; }
 .chat-assistant { align-self: flex-start; background: var(--bg-card); border: 1px solid var(--line); border-bottom-left-radius: 4px; width: 100%; }
 .chat-text { white-space: pre-wrap; }
+.image-description {
+  margin: 8px 0 12px; padding: 10px 12px;
+  border-left: 3px solid var(--accent); border-radius: 6px;
+  background: var(--bg-input); line-height: 1.7;
+}
+.image-description-title {
+  display: block; margin-bottom: 4px; color: var(--text-dim);
+  font-size: .76rem;
+}
 .btn-reuse { display: block; margin-top: 9px; border-color: #7b5156; color: #efb9a7; }
 
 .btn-del-msg {

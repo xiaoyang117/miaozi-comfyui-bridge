@@ -178,7 +178,7 @@
       </div>
 
       <div class="settings-group">
-        <h3>LLM（提示词生成）</h3>
+        <h3>LLM（提示词与说明）</h3>
         <label for="s_llm_base_url">API 地址</label>
         <input id="s_llm_base_url" type="text" placeholder="https://api.openai.com/v1 或 http://127.0.0.1:8080/v1">
         <label>API Key</label>
@@ -246,6 +246,7 @@
         <h3>提示词风格</h3>
         <label>自定义系统提示词（留空用默认）</label>
         <textarea id="s_custom_system_prompt" rows="9" spellcheck="false"></textarea>
+        <p class="hint">生成时会追加「英文提示词 + 中文画面说明」的输出格式要求。</p>
         <label for="s_positive_prompt_prefix">常驻正向内容</label>
         <textarea id="s_positive_prompt_prefix" rows="4" spellcheck="false"
           placeholder="masterpiece, best quality, cinematic lighting"></textarea>
@@ -586,11 +587,26 @@ function renderMessage(m) {
       }
     }
   } else {
+    const description = m.meta && typeof m.meta.description === 'string'
+      ? m.meta.description.trim() : '';
     if (m.meta && m.meta.character_status) {
       const state = document.createElement('div');
       state.className = 'dim';
       state.textContent = m.meta.character_status;
       div.appendChild(state);
+    }
+    if (description) {
+      const note = document.createElement('div');
+      note.className = 'image-description';
+      const title = document.createElement('strong');
+      title.className = 'image-description-title';
+      title.textContent = '画面说明';
+      const text = document.createElement('div');
+      text.className = 'chat-text';
+      text.textContent = description;
+      note.appendChild(title);
+      note.appendChild(text);
+      div.appendChild(note);
     }
     if (m.vlm) {
       const pre = document.createElement('pre');
@@ -608,7 +624,7 @@ function renderMessage(m) {
       const pre = document.createElement('pre');
       pre.className = 'mono-block prompt-block';
       pre.textContent = m.content;
-      const coll = makeCollapsible('提示词', pre, true);
+      const coll = makeCollapsible('提示词', pre, !description);
       div.appendChild(coll);
       const copyBtn = document.createElement('button');
       copyBtn.className = 'btn-inline';
@@ -1092,7 +1108,7 @@ async function saveWorkflowControls() {
 
 // ==================== 发送 ====================
 function setStep(key) {
-  const map = {vlm: '识别图片…', search: '检索角色特征…', llm: '生成提示词…', comfyui: 'ComfyUI 出图中…'};
+  const map = {vlm: '识别图片…', search: '检索角色特征…', llm: '生成提示词和说明…', comfyui: 'ComfyUI 出图中…'};
   $('stepText').textContent = map[key] || key;
   $('stepIndicator').classList.remove('hidden', 'step-done');
 }
