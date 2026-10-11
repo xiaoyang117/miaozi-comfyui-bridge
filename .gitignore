@@ -20,3 +20,6 @@ _e2e/llm.log
 _e2e/data/
 _e2e/live_out.png
 _e2e/live_ph_out.png
+.miaozi-update-backups/
+.miaozi-update-*/
+.miaozi-download-*/
