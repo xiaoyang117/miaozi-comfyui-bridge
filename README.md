@@ -122,8 +122,10 @@ python app.py
 把可信插件的文件夹复制到 `server/data/plugins/`，在网站「插件」页重新扫描、
 启用并配置。插件可参与 LLM 提示词、ComfyUI 工作流、出图结果，
 还可提供独立的 API 与网页面板；没有插件时原流程照常工作。
-插件默认关闭，卸载或更新前先停用。完整格式和可运行示例见
-[插件开发说明](docs/plugins.md) 和 `examples/plugins/prompt_suffix/`。
+插件默认关闭，卸载或更新前先停用。想自己做插件，可从
+[插件制作教程](docs/plugins.md) 开始：包含可复制的最小插件、配置说明、
+四个生成扩展点、采样步数示例、API 与网页面板、调试和发布步骤。
+已有完整示例在 [`examples/plugins/prompt_suffix/`](examples/plugins/prompt_suffix/)。
 
 ### 角色特征库（可选）
 
