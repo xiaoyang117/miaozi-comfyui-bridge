@@ -10,6 +10,7 @@ import glob
 import json
 import mimetypes
 import os
+import secrets
 import tempfile
 import time
 import uuid
@@ -185,6 +186,26 @@ class ComfyBackend:
 
     # ---------- 生成 ----------
 
+    @staticmethod
+    def _randomize_seeds(workflow: dict) -> None:
+        seeds = {}
+        for node in workflow.values():
+            if not isinstance(node, dict):
+                continue
+            inputs = node.get("inputs")
+            if not isinstance(inputs, dict):
+                continue
+            for key in ("seed", "noise_seed"):
+                value = inputs.get(key)
+                if type(value) is not int:
+                    continue
+                if value not in seeds:
+                    replacement = secrets.randbelow(2**63)
+                    while replacement == value:
+                        replacement = secrets.randbelow(2**63)
+                    seeds[value] = replacement
+                inputs[key] = seeds[value]
+
     def generate(self, job: dict) -> dict:
         started = time.time()
         workflow_path = job.get("workflow_path") or self.cfg.get("workflow_path")
@@ -196,6 +217,8 @@ class ComfyBackend:
             if ph:
                 replacements[ph] = prompt
         workflow = self._apply_replacements(workflow, replacements)
+        if job.get("randomize_seed"):
+            self._randomize_seeds(workflow)
 
         timeout = float(job.get("timeout") or self.cfg.get("run_timeout") or 600)
         tmp_root = Path(tempfile.mkdtemp(prefix="miaozi_"))

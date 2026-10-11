@@ -516,6 +516,10 @@ def api_generate():
 
 
 def _run_generation(payload: dict):
+    if "regenerate_message_id" in payload:
+        yield from _run_regeneration(payload)
+        return
+
     user_input = (payload.get("prompt") or "").strip()
     if not user_input:
         yield _sse({"step": "error", "error": "请输入图片描述"})
@@ -655,30 +659,10 @@ def _run_generation(payload: dict):
     if positive_prefix:
         prompt = f"{positive_prefix}, {prompt}"
 
-    # ---------- 3. 引擎驱动 ComfyUI 出图 ----------
-    yield _sse({"step": "comfyui"})
-    replacements = settings.build_replacements(prompt, width, height)
-    try:
-        result = engine.generate({
-            "workflow_path": workflow_path,
-            "prompt": prompt,
-            "replacements": replacements,
-            "width": width,
-            "height": height,
-            "timeout": settings.comfy_timeout,
-        })
-    except Exception as e:
-        yield _sse({"step": "error", "error": f"ComfyUI 执行失败：{e}"})
+    generated = yield from _generate_image(prompt, workflow_path, width, height)
+    if generated is None:
         return
-
-    image_url = ""
-    if result.get("image"):
-        image_url = _save_data_url(result["image"], prefix="gen_")
-    if not image_url:
-        yield _sse({"step": "error",
-                    "error": result.get("error")
-                    or "ComfyUI 没有返回图片，请检查工作流的保存节点 ID"})
-        return
+    result, image_url = generated
 
     # ---------- 4. 落库 ----------
     store.add_message(session_id, "user", content=user_input,
@@ -688,6 +672,7 @@ def _run_generation(payload: dict):
     store.add_message(session_id, "assistant", content=prompt,
                       image=image_url, character=character_info,
                       meta={"width": width, "height": height,
+                            "workflow_path": workflow_path,
                             "elapsed": result.get("elapsed"),
                             "character_status": character_status,
                             "character_id": (characters[0]["character"]
@@ -697,6 +682,72 @@ def _run_generation(payload: dict):
     yield _sse({"step": "done", "image": image_url, "prompt": prompt,
                 "character": character_info, "vlm": vlm_text,
                 "session_id": session_id})
+
+
+def _run_regeneration(payload: dict):
+    session_id = payload.get("session_id")
+    message_id = payload.get("regenerate_message_id")
+    if (not isinstance(session_id, str) or not session_id
+            or type(message_id) is not int):
+        yield _sse({"step": "error", "error": "请选择要再次生成的图片"})
+        return
+    source = store.get_message(session_id, message_id)
+    if (source is None or source["role"] != "assistant"
+            or not source["image"] or not source["content"].strip()):
+        yield _sse({"step": "error", "error": "原生成记录不存在或没有可用提示词"})
+        return
+
+    prompt = source["content"]
+    meta = source["meta"]
+    workflow_path = _resolve_workflow_path(
+        meta.get("workflow_path") or payload.get("workflow_path"))
+    if not workflow_path:
+        yield _sse({"step": "error",
+                    "error": "没有找到工作流文件。请在配置页设置工作流路径"})
+        return
+    default_width, default_height = settings.resolve_size(payload.get("preset_index"))
+    width = meta.get("width") or default_width
+    height = meta.get("height") or default_height
+    generated = yield from _generate_image(
+        prompt, workflow_path, width, height, randomize_seed=True)
+    if generated is None:
+        return
+    result, image_url = generated
+    store.add_message(session_id, "assistant", content=prompt,
+                      image=image_url, character=source["character"],
+                      vlm=source["vlm"],
+                      meta={**meta, "width": width, "height": height,
+                            "workflow_path": workflow_path,
+                            "elapsed": result.get("elapsed"),
+                            "regenerated_from": source["id"],
+                            "character_status": "再次生成：复用提示词，未调用 LLM"})
+    yield _sse({"step": "done", "image": image_url, "prompt": prompt,
+                "session_id": session_id})
+
+
+def _generate_image(prompt: str, workflow_path: str, width: int, height: int,
+                    randomize_seed: bool = False):
+    yield _sse({"step": "comfyui"})
+    try:
+        result = engine.generate({
+            "workflow_path": workflow_path,
+            "prompt": prompt,
+            "replacements": settings.build_replacements(prompt, width, height),
+            "width": width,
+            "height": height,
+            "timeout": settings.comfy_timeout,
+            "randomize_seed": randomize_seed,
+        })
+    except Exception as e:
+        yield _sse({"step": "error", "error": f"ComfyUI 执行失败：{e}"})
+        return
+    image_url = _save_data_url(result["image"], prefix="gen_") if result.get("image") else ""
+    if not image_url:
+        yield _sse({"step": "error",
+                    "error": result.get("error")
+                    or "ComfyUI 没有返回图片，请检查工作流的保存节点 ID"})
+        return
+    return result, image_url
 
 
 # ---------------------------------------------------------------- 错误兜底
