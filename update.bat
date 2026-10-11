@@ -31,9 +31,6 @@ if errorlevel 1 (
     exit /b 1
 )
 echo Close the MiaoZi website before updating.
-echo Enter a local HTTP proxy, such as http://127.0.0.1:7890
-set "MIAOZI_UPDATE_PROXY="
-set /p "MIAOZI_UPDATE_PROXY=Proxy URL (blank for system proxy or direct): "
 python "%MIAOZI_UPDATE_ROOT%update.py"
 set "MIAOZI_UPDATE_RESULT=%ERRORLEVEL%"
 if not "%MIAOZI_UPDATE_RESULT%"=="0" (
