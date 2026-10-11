@@ -1027,8 +1027,10 @@ if __name__ == "__main__":
 
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "5000"))
-    print(f"喵梓服务已启动： http://127.0.0.1:{port}")
+    print("正在启动喵梓网页服务...")
+    print(f"本机访问：http://127.0.0.1:{port}")
+    print(f"监听地址：{host}，端口：{port}")
+    print("首次使用请在网页「配置」中填写 ComfyUI 和 LLM 连接信息。")
     if not settings.access_password:
-        print("提示：当前未设置访问口令。只在自己电脑用可以不设；"
-              "局域网/手机访问建议在配置页里设置一个。")
+        print("提示：当前未设置访问口令，可在网页「配置」中设置。")
     waitress.serve(app, host=host, port=port, threads=16)
