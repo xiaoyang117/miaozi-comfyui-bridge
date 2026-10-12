@@ -222,7 +222,7 @@
         <input id="s_llm_api_key" type="password" autocomplete="new-password" placeholder="本机模型通常可留空">
         <label for="s_llm_model">模型名称</label>
         <input id="s_llm_model" type="text" placeholder="本机模型填实际名称；llama-server 可填 local-model">
-        <button class="btn-secondary" onclick="testLLM()">测试连接</button>
+        <button id="testLLMButton" type="button" class="btn-secondary" onclick="testLLM()">测试连接</button>
       </div>
 
       <div class="settings-group">
@@ -233,7 +233,7 @@
         <input id="s_vlm_api_key" type="password" autocomplete="new-password">
         <label>模型名称</label>
         <input id="s_vlm_model" type="text" placeholder="gemini-2.5-flash">
-        <button class="btn-secondary" onclick="testVLM()">测试连接</button>
+        <button id="testVLMButton" type="button" class="btn-secondary" onclick="testVLM()">测试连接</button>
       </div>
 
       <div class="settings-group">
@@ -254,8 +254,7 @@
         <input id="s_comfy_bin" type="text" placeholder="C:/.../Scripts/comfy.exe">
         <label>ComfyUI 地址</label>
         <input id="s_comfyui_url" type="text" placeholder="http://127.0.0.1:8188">
-        <button class="btn-secondary" onclick="testComfy()">测试连接</button>
-        <div id="comfyInfo" class="hint"></div>
+        <button id="testComfyButton" type="button" class="btn-secondary" onclick="testComfy()">测试连接</button>
       </div>
 
       <div class="settings-group">
@@ -456,9 +455,9 @@ function showError(msg) {
   $('settingsError').classList.remove('hidden');
 }
 function hideError() { $('settingsError').classList.add('hidden'); }
-function showModal(msg, type) {
+function showModal(msg, type, title) {
   const h = $('modalHeader');
-  h.textContent = type === 'success' ? '完成' : '出错了';
+  h.textContent = title || (type === 'success' ? '完成' : '出错了');
   h.className = 'modal-header ' + (type === 'success' ? 'modal-success' : 'modal-error');
   $('modalErrorText').textContent = msg;
   $('errorModal').classList.remove('hidden');
@@ -1670,48 +1669,42 @@ async function saveSettings() {
   } catch (e) { showError('保存失败：' + e.message); }
 }
 
-async function testLLM() {
+async function testConnection(buttonId, name, path, collectBody, formatResult) {
+  const button = $(buttonId);
+  if (button.disabled) return;
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = '测试中…';
   hideError();
   try {
-    const body = collectSettings();
-    $('settingsErrorText').textContent = '测试中…';
-    $('settingsError').classList.remove('hidden');
-    const r = await api('/api/test/llm', {method: 'POST', body: body});
+    const r = await api(path, {method: 'POST', body: collectBody()});
     const d = await r.json();
-    if (d.success) {
-      showError(`LLM 连接正常\n返回：${d.output}`);
-    } else {
-      showError('LLM 失败：' + (d.error || ''));
-    }
-  } catch (e) { showError('测试失败：' + e.message); }
+    const success = r.ok && d.success;
+    showModal(success
+      ? `${name} 连接正常\n${formatResult(d)}`
+      : `${name} 连接失败：${d.error || d.body || 'HTTP ' + r.status}`,
+      success ? 'success' : 'error', `${name} 连接测试`);
+  } catch (e) {
+    showModal(`${name} 测试失败：${e.message}`, 'error', `${name} 连接测试`);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
 }
 
-async function testVLM() {
-  hideError();
-  try {
-    const r = await api('/api/test/vlm', {method: 'POST', body: collectSettings()});
-    const d = await r.json();
-    showError(d.success
-      ? `VLM 正常（HTTP ${d.status}）\n${d.body}`
-      : `VLM 失败（HTTP ${d.status}）\n${d.body}`);
-  } catch (e) { showError('测试失败：' + e.message); }
+function testLLM() {
+  return testConnection('testLLMButton', 'LLM', '/api/test/llm', collectSettings,
+    d => `返回：${d.output || ''}`);
 }
 
-async function testComfy() {
-  hideError();
-  $('settingsErrorText').textContent = '正在测试 ComfyUI…';
-  $('settingsError').classList.remove('hidden');
-  try {
-    const r = await api('/api/test/comfyui', {method: 'POST', body: {}});
-    const d = await r.json();
-    if (d.success) {
-      $('comfyInfo').textContent = 'ComfyUI 正常';
-      showError('ComfyUI 连接正常\n' + (d.body || ''));
-    } else {
-      $('comfyInfo').textContent = '';
-      showError('ComfyUI 失败：' + (d.error || ''));
-    }
-  } catch (e) { showError('测试失败：' + e.message); }
+function testVLM() {
+  return testConnection('testVLMButton', 'VLM', '/api/test/vlm', collectSettings,
+    d => `HTTP ${d.status}\n${d.body || ''}`);
+}
+
+function testComfy() {
+  return testConnection('testComfyButton', 'ComfyUI', '/api/test/comfyui', () => ({}),
+    d => d.body || '');
 }
 
 async function testCharacters() {
