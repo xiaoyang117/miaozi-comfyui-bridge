@@ -615,15 +615,7 @@ def api_workflows():
     requested = request.args.get("path", "")
     try:
         result = engine.list_workflows(requested)
-        items = result.get("workflows") or []
-        # 兜底：把项目自带的 workflows/ 目录也列进去
-        if DEFAULT_WORKFLOW_DIR.is_dir():
-            seen = {i.get("path") for i in items}
-            for f in sorted(globmod.glob(str(DEFAULT_WORKFLOW_DIR / "*.json"))):
-                ap = os.path.abspath(f)
-                if ap not in seen:
-                    items.append({"path": ap, "name": os.path.basename(f)})
-        return jsonify({"success": True, "workflows": items,
+        return jsonify({"success": True, "workflows": result.get("workflows") or [],
                         "dir": result.get("dir", "")})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 200

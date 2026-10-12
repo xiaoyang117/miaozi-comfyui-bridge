@@ -132,6 +132,8 @@
           <div class="control-picks">
             <label for="chat_workflow">工作流</label>
             <select id="chat_workflow" aria-label="工作流"></select>
+            <button type="button" class="btn-secondary" onclick="loadWorkflowList(true)">重新识别工作流</button>
+            <p id="workflowListStatus" class="hint"></p>
             <label for="chat_preset">分辨率</label>
             <select id="chat_preset" aria-label="分辨率"></select>
           </div>
@@ -163,6 +165,8 @@
         <h3>工作流</h3>
         <label for="secondPassWorkflow">选择工作流</label>
         <select id="secondPassWorkflow"></select>
+        <button type="button" class="btn-secondary" onclick="loadWorkflowList(true)">重新识别工作流</button>
+        <p id="secondPassWorkflowListStatus" class="hint"></p>
         <p class="hint">与创作页使用同一工作流。调整后的二采参数会用于下一次生成。</p>
       </div>
       <div class="settings-group">
@@ -245,6 +249,7 @@
         <input id="s_mcp_command" type="text" placeholder="comfy-mcp 或 C:/.../Scripts/comfy-mcp.exe">
         <label>ComfyUI 工作区目录（便携版必填）</label>
         <input id="s_comfy_project" type="text" placeholder="H:/ComfyUI_windows_portable/ComfyUI">
+        <p class="hint">填写并保存后，会自动扫描其中的 workflows 和 user 下各用户的 workflows 文件夹及子文件夹。</p>
         <label>comfy 命令路径（venv 装的填绝对路径）</label>
         <input id="s_comfy_bin" type="text" placeholder="C:/.../Scripts/comfy.exe">
         <label>ComfyUI 地址</label>
@@ -257,7 +262,8 @@
         <h3>工作流与占位符</h3>
         <label>当前工作流</label>
         <input id="s_workflow_path" type="text" placeholder="/path/to/workflow.json">
-        <button class="btn-secondary" onclick="loadWorkflowList(true)">从本地刷新列表</button>
+        <button class="btn-secondary" onclick="loadWorkflowList(true)">重新识别工作流</button>
+        <p class="hint">自动扫描项目工作流、当前工作流所在文件夹及已配置的 ComfyUI 工作区。仅 API 格式可用于生成，画布格式需要在 ComfyUI 中重新导出。</p>
         <label>提示词占位符</label>
         <input id="s_prompt_placeholder" type="text" placeholder="114514.1919810">
         <label>保存节点 ID</label>
@@ -963,33 +969,49 @@ function removeImage() {
 }
 
 // ==================== 工作流 / 分辨率 ====================
-async function loadWorkflowList(notify) {
+async function loadWorkflowList(notify, preferredPath = '') {
   const sel = $('chat_workflow');
-  sel.innerHTML = '<option>加载中…</option>';
-  selectWorkflowPath(sel.value, false);
   try {
-    const r = await api('/api/workflows');
+    const path = $('s_workflow_path').value.trim();
+    const r = await api('/api/workflows?path=' + encodeURIComponent(path));
     const d = await r.json();
+    if (!r.ok || !d.success) throw new Error(d.error || '读取工作流失败');
+    const previous = sel.value;
     sel.innerHTML = '';
     const list = (d && d.workflows) || [];
+    const available = list.filter(wf => wf.format === 'api');
+    const formats = {api: 'API', canvas: '画布格式，需导出 API', invalid: '无法读取或不是工作流'};
+    const nameCounts = new Map();
+    list.forEach(wf => nameCounts.set(wf.name, (nameCounts.get(wf.name) || 0) + 1));
+    const status = `发现 ${list.length} 个 JSON 文件，${available.length} 个 API 工作流`;
+    ['workflowListStatus', 'secondPassWorkflowListStatus'].forEach(id => {
+      $(id).textContent = status;
+    });
     if (!list.length) {
       sel.innerHTML = '<option value="">无工作流文件</option>';
     } else {
+      if (!available.length) sel.add(new Option('未找到可用的 API 工作流', ''));
       list.forEach(wf => {
         const o = document.createElement('option');
-        o.value = wf.path; o.textContent = wf.name;
+        o.value = wf.path;
+        o.textContent = `${wf.name} · ${formats[wf.format] || formats.invalid}`;
+        if (nameCounts.get(wf.name) > 1) o.textContent += ` · ${wf.dir}`;
+        o.title = wf.path;
+        o.disabled = wf.format !== 'api';
         sel.appendChild(o);
       });
-      const cur = S.settings.workflow_path;
-      if (cur && list.some(w => w.path === cur)) sel.value = cur;
-      else if (list.length) selectWorkflowPath(list[0].path, false);
+      const cur = [preferredPath, previous, S.settings.workflow_path]
+        .find(candidate => available.some(wf => wf.path === candidate));
+      sel.value = cur || (available[0] || {}).path || '';
     }
     selectWorkflowPath(sel.value, false);
-    loadWorkflowControls();
-    if (notify) showModal(`读取到 ${list.length} 个工作流\n${d.dir || ''}`, 'success');
+    if (!workflowDescription || inspectedWorkflow !== sel.value) loadWorkflowControls();
+    if (notify) showModal(`${status}\n扫描目录：${d.dir || '无'}\n画布格式需使用 ComfyUI 的 API 导出功能。`, 'success');
   } catch (e) {
-    sel.innerHTML = '<option value="">加载失败</option>';
-    selectWorkflowPath(sel.value, false);
+    ['workflowListStatus', 'secondPassWorkflowListStatus'].forEach(id => {
+      $(id).textContent = '识别失败：' + e.message;
+    });
+    if (notify) showError('识别工作流失败：' + e.message);
   }
 }
 function selectWorkflowPath(path, syncInput) {
@@ -1232,7 +1254,7 @@ function currentWorkflowControls() {
           second_pass: currentSecondPassControls()};
 }
 async function loadWorkflowControls() {
-  const path = $('chat_workflow').value || S.settings.workflow_path;
+  const path = $('chat_workflow').value;
   workflowDescription = null;
   inspectedWorkflow = '';
   $('secondPassMode').disabled = true;
@@ -1242,14 +1264,14 @@ async function loadWorkflowControls() {
   $('secondPassNodes').classList.add('hidden');
   $('secondPassAdd').classList.add('hidden');
   $('secondPassStatus').textContent = path ? '正在读取二采节点…' : '请先选择工作流';
-  if (!path) return;
-  $('workflowControlStatus').textContent = '正在读取工作流节点…';
   $('addLoraButton').disabled = true;
+  $('workflowControlStatus').textContent = path ? '正在读取工作流节点…' : '请先选择 API 工作流';
+  if (!path) return;
   try {
     const response = await api('/api/workflows/inspect?path=' + encodeURIComponent(path));
     const data = await response.json();
     if (!response.ok || !data.success) throw new Error(data.error || '无法读取工作流');
-    if (path !== ($('chat_workflow').value || S.settings.workflow_path)) return;
+    if (path !== $('chat_workflow').value) return;
     workflowDescription = data;
     inspectedWorkflow = path;
     const controls = savedWorkflowControls(path);
@@ -1302,7 +1324,7 @@ async function loadWorkflowControls() {
     $('addLoraButton').disabled = !data.samplers.length;
     renderSecondPassControls(data, controls);
   } catch (e) {
-    if (path === ($('chat_workflow').value || S.settings.workflow_path)) {
+    if (path === $('chat_workflow').value) {
       $('workflowControlStatus').textContent = '读取失败：' + e.message;
       $('secondPassStatus').textContent = '读取失败：' + e.message;
     }
@@ -1322,7 +1344,7 @@ async function loadWorkflowControls() {
     $('loraModelStatus').textContent += ' 未找到有模型输入的采样器，无法添加 LoRA。';
 }
 async function saveWorkflowControls() {
-  const path = $('chat_workflow').value || S.settings.workflow_path;
+  const path = $('chat_workflow').value;
   if (!path) return showError('请先选择工作流');
   if (!workflowDescription || inspectedWorkflow !== path) {
     return showError('请先等工作流节点读取完成');
@@ -1352,6 +1374,7 @@ function hideStep() { $('stepIndicator').classList.add('hidden'); }
 async function sendMessage(regenerate = null) {
   if (isGenerating) return;
   if ($('useNsfw').disabled) return showModal('正在保存 NSFW 开关，请稍后再生成');
+  if (!$('chat_workflow').value) return showModal('请先选择可用的 API 工作流；画布格式需要在 ComfyUI 中重新导出。');
   const input = $('chatInput');
   const text = regenerate ? '' : input.value.trim();
   if (!regenerate && !text) return;
@@ -1642,6 +1665,7 @@ async function saveSettings() {
       localStorage.setItem('mz_pw', accessPassword);
     }
     renderPresets();
+    await loadWorkflowList(false, S.settings.workflow_path);
     showModal('配置已保存', 'success');
   } catch (e) { showError('保存失败：' + e.message); }
 }

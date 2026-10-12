@@ -39,6 +39,7 @@ class Engine:
             "save_node_id": settings.get("save_node_id"),
             "workflow_dirs": settings.get("workflow_dirs"),
             "workflow_path": settings.get("workflow_path"),
+            "comfy_project": settings.get("comfy_project"),
             "prompt_placeholder": settings.get("prompt_placeholder"),
             "width_placeholder": settings.get("width_placeholder"),
             "height_placeholder": settings.get("height_placeholder"),
@@ -141,7 +142,6 @@ class Engine:
         return result
 
     def list_workflows(self, extra_dir: str = "") -> dict:
-        self.ensure_mcp()
         return self._backend().list_workflows(extra_dir)
 
     def inspect_workflow(self, path: str) -> dict:
