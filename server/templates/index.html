@@ -45,6 +45,7 @@
       <button class="btn-icon btn-menu" title="对话列表" aria-label="打开对话列表" onclick="toggleSidebar()">☰</button>
       <nav class="tabs">
         <button class="tab active" data-tab="chat" onclick="switchTab('chat')">创作</button>
+        <button class="tab" data-tab="second-pass" onclick="switchTab('second-pass')">二采</button>
         <button class="tab" data-tab="settings" onclick="switchTab('settings')">配置</button>
         <button class="tab" data-tab="plugins" onclick="switchTab('plugins')">插件</button>
       </nav>
@@ -151,28 +152,41 @@
             <p id="loraModelStatus" class="hint"></p>
             <button type="button" class="btn-secondary" onclick="saveWorkflowControls()">保存此工作流参数</button>
           </details>
-          <details class="workflow-controls" open>
-            <summary>二次采样专区</summary>
-            <p class="hint">先生成底图，再放大并补充细节。默认保持工作流原设置。</p>
-            <p id="secondPassStatus" class="hint">选择工作流后读取二采节点</p>
-            <label for="secondPassMode">二采方式</label>
-            <select id="secondPassMode" onchange="updateSecondPassMode()" disabled>
-              <option value="original">保持工作流原设置</option>
-              <option value="existing">调整已有二采</option>
-              <option value="add">新增二采</option>
-            </select>
-            <div id="secondPassNodes" class="hidden"></div>
-            <div id="secondPassAdd" class="hidden">
-              <label for="secondPassSource">使用哪轮底图</label>
-              <select id="secondPassSource" onchange="renderSecondPassAddition()"></select>
-              <div id="secondPassAddFields" class="sampling-fields"></div>
-              <p class="hint">继承底图的模型、LoRA 和提示词，在 VAE 解码前加入 latent 放大与二采。</p>
-            </div>
-            <p class="hint">降噪越高，画面变化通常越大；放大倍数会增加显存和耗时。采样器与调度器请填写 ComfyUI 可用的名称。</p>
-            <button type="button" class="btn-secondary" onclick="saveWorkflowControls()">保存此工作流参数</button>
-          </details>
         </div>
       </aside>
+    </div>
+
+    <!-- -------- 二次采样面板 -------- -->
+    <div id="panel-second-pass" class="panel">
+      <div class="settings-intro"><span class="eyebrow">SECOND PASS</span><h1>二次采样</h1><p>先生成底图，再放大并补充细节。默认保持工作流原设置。</p></div>
+      <div class="settings-group">
+        <h3>工作流</h3>
+        <label for="secondPassWorkflow">选择工作流</label>
+        <select id="secondPassWorkflow"></select>
+        <p class="hint">与创作页使用同一工作流。调整后的二采参数会用于下一次生成。</p>
+      </div>
+      <div class="settings-group">
+        <h3>二采参数</h3>
+        <p id="secondPassStatus" class="hint">选择工作流后读取二采节点</p>
+        <label for="secondPassMode">二采方式</label>
+        <select id="secondPassMode" onchange="updateSecondPassMode()" disabled>
+          <option value="original">保持工作流原设置</option>
+          <option value="existing">调整已有二采</option>
+          <option value="add">新增二采</option>
+        </select>
+        <div id="secondPassNodes" class="hidden"></div>
+        <div id="secondPassAdd" class="hidden">
+          <label for="secondPassSource">使用哪轮底图</label>
+          <select id="secondPassSource" onchange="renderSecondPassAddition()"></select>
+          <div id="secondPassAddFields" class="sampling-fields"></div>
+          <p class="hint">继承底图的模型、LoRA 和提示词，在 VAE 解码前加入 latent 放大与二采。</p>
+        </div>
+        <p class="hint">降噪越高，画面变化通常越大；放大倍数会增加显存和耗时。采样器与调度器请填写 ComfyUI 可用的名称。</p>
+      </div>
+      <div class="row-gap">
+        <button type="button" onclick="saveWorkflowControls()">保存此工作流参数</button>
+        <button type="button" class="btn-secondary" onclick="switchTab('chat')">返回创作</button>
+      </div>
     </div>
 
     <!-- -------- 配置面板 -------- -->
@@ -952,6 +966,7 @@ function removeImage() {
 async function loadWorkflowList(notify) {
   const sel = $('chat_workflow');
   sel.innerHTML = '<option>加载中…</option>';
+  selectWorkflowPath(sel.value, false);
   try {
     const r = await api('/api/workflows');
     const d = await r.json();
@@ -969,15 +984,19 @@ async function loadWorkflowList(notify) {
       if (cur && list.some(w => w.path === cur)) sel.value = cur;
       else if (list.length) selectWorkflowPath(list[0].path, false);
     }
+    selectWorkflowPath(sel.value, false);
     loadWorkflowControls();
     if (notify) showModal(`读取到 ${list.length} 个工作流\n${d.dir || ''}`, 'success');
   } catch (e) {
     sel.innerHTML = '<option value="">加载失败</option>';
+    selectWorkflowPath(sel.value, false);
   }
 }
 function selectWorkflowPath(path, syncInput) {
   const sel = $('chat_workflow');
   if ([...sel.options].some(o => o.value === path)) sel.value = path;
+  $('secondPassWorkflow').replaceChildren(...[...sel.options].map(o => o.cloneNode(true)));
+  $('secondPassWorkflow').value = sel.value;
   if (syncInput) $('s_workflow_path').value = path;
 }
 function renderPresets() {
@@ -1712,9 +1731,11 @@ chatInput.addEventListener('drop', e => {
   addFiles(Array.from(e.dataTransfer.files || []));
 });
 
-$('chat_workflow').addEventListener('change', function () {
-  $('s_workflow_path').value = this.value;
-  loadWorkflowControls();
+['chat_workflow', 'secondPassWorkflow'].forEach(id => {
+  $(id).addEventListener('change', function () {
+    selectWorkflowPath(this.value, true);
+    loadWorkflowControls();
+  });
 });
 
 // 主动刷新引擎状态，让「离线/在线」能自己变
