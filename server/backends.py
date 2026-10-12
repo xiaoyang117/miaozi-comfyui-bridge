@@ -6,7 +6,6 @@ ComfyUI 这里优先用 comfy-mcp 的 tools/call 驱动；如果服务端版本�
 """
 
 import base64
-import glob
 import json
 import mimetypes
 import os
@@ -20,6 +19,8 @@ import requests
 
 from plugins import plugins
 from workflow_controls import apply_loras, apply_resolution, apply_second_pass, describe_workflow
+
+DEFAULT_WORKFLOW_DIR = Path(__file__).resolve().parents[1] / "workflows"
 
 MIME_BY_EXT = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
@@ -101,30 +102,75 @@ class ComfyBackend:
     # ---------- 工作流 ----------
 
     def list_workflows(self, extra_dir: str = "") -> dict:
-        dirs = []
+        candidates = []
         cfg_dirs = self.cfg.get("workflow_dirs") or []
         if isinstance(cfg_dirs, str):
             cfg_dirs = [cfg_dirs]
         for d in cfg_dirs:
             if d:
-                dirs.append(os.path.expanduser(str(d)))
-        if extra_dir:
-            p = os.path.expanduser(str(extra_dir))
-            dirs.append(p if os.path.isdir(p) else os.path.dirname(p))
+                candidates.append(Path(d).expanduser())
+        for path in (self.cfg.get("workflow_path"), extra_dir):
+            if path:
+                p = Path(path).expanduser()
+                candidates.append(p if p.is_dir() else p.parent)
+        project = self.cfg.get("comfy_project")
+        if project:
+            root = Path(project).expanduser()
+            candidates.append(root / "workflows")
+            candidates.extend(sorted((root / "user").glob("*/workflows")))
+        candidates.append(DEFAULT_WORKFLOW_DIR)
 
         items = []
         seen = set()
-        for d in dirs:
-            if not os.path.isdir(d):
+        dirs = []
+        visited = set()
+        for candidate in candidates:
+            directory = os.path.abspath(candidate)
+            key = os.path.normcase(os.path.realpath(directory))
+            if not os.path.isdir(directory) or key in visited:
                 continue
-            for f in sorted(glob.glob(os.path.join(d, "*.json"))):
-                ap = os.path.abspath(f)
-                if ap in seen:
+            dirs.append(directory)
+            for parent, subdirs, files in os.walk(directory):
+                parent_key = os.path.normcase(os.path.realpath(parent))
+                if parent_key in visited:
+                    subdirs.clear()
                     continue
-                seen.add(ap)
-                items.append({"path": ap, "name": os.path.basename(f),
-                              "dir": d})
+                visited.add(parent_key)
+                subdirs.sort()
+                for filename in sorted(files):
+                    if Path(filename).suffix.lower() != ".json":
+                        continue
+                    path = os.path.join(parent, filename)
+                    file_key = os.path.normcase(os.path.realpath(path))
+                    if file_key in seen:
+                        continue
+                    seen.add(file_key)
+                    items.append({
+                        "path": path,
+                        "name": Path(path).relative_to(directory).as_posix(),
+                        "dir": directory,
+                        "format": self._workflow_format(path),
+                    })
         return {"workflows": items, "dir": " | ".join(dirs)}
+
+    @staticmethod
+    def _workflow_format(path: str) -> str:
+        try:
+            with open(path, encoding="utf-8") as source:
+                data = json.load(source)
+        except (OSError, ValueError):
+            return "invalid"
+        if isinstance(data, dict) and "prompt" in data:
+            data = data["prompt"]
+        if isinstance(data, dict) and "nodes" in data:
+            return "canvas"
+        if (isinstance(data, dict) and data
+                and all(isinstance(node, dict)
+                        and isinstance(node.get("class_type"), str)
+                        and isinstance(node.get("inputs"), dict)
+                        for node in data.values())):
+            return "api"
+        return "invalid"
 
     def _load_workflow(self, path: str) -> dict:
         p = os.path.expanduser(str(path or ""))
